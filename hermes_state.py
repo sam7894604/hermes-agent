@@ -13766,6 +13766,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         ``after_id`` enables keyset pagination (``id > after_id``): O(1)
         page seeks on huge transcripts where OFFSET degrades to O(n) per
         page. Ascending order only (incompatible with ``latest``/``offset``).
+
+        When the current session was created by a ``model_switch`` split,
+        messages from ancestor sessions in the model-switch chain are
+        included automatically so that conversational context survives
+        across model changes.  The chain stops at the first ancestor whose
+        ``end_reason`` is not ``'model_switch'`` (or has no parent).
         """
         if after_id is not None and (latest or offset):
             raise ValueError("after_id is incompatible with latest/offset paging")
@@ -13778,13 +13784,24 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             # Display history: active rows plus rows preserved by in-place
             # compaction (active=0, compacted=1), but never soft-deleted
             # Undo/Rewind rows (active=0, compacted=0).
-            active_clause = " AND (active = 1 OR compacted = 1)"
+            active_clause = " AND (m.active = 1 OR m.compacted = 1)"
         else:
-            active_clause = " AND active = 1"
-        keyset_clause = " AND id > ?" if after_id is not None else ""
+            active_clause = " AND m.active = 1"
+        keyset_clause = " AND m.id > ?" if after_id is not None else ""
         sql = (
-            "SELECT * FROM messages WHERE session_id = ?"
-            f"{active_clause}{keyset_clause} ORDER BY id {'DESC' if latest else 'ASC'}"
+            "WITH RECURSIVE chain(sid) AS ("
+            "  SELECT ? AS sid"
+            "  UNION ALL"
+            "  SELECT parent.id"
+            "    FROM chain c"
+            "    JOIN sessions child  ON child.id = c.sid"
+            "    JOIN sessions parent ON parent.id = child.parent_session_id"
+            "   WHERE parent.end_reason = 'model_switch'"
+            ")"
+            " SELECT m.* FROM messages m"
+            " JOIN chain ON m.session_id = chain.sid"
+            f" WHERE 1=1{active_clause}{keyset_clause}"
+            f" ORDER BY m.id {'DESC' if latest else 'ASC'}"
         )
         params: list = [session_id]
         if after_id is not None:
@@ -13795,8 +13812,19 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             # generations, then apply paging.
             with self._read_ctx() as conn:
                 cursor = conn.execute(
-                    "SELECT * FROM messages WHERE session_id = ?" + active_clause
-                    + " ORDER BY id ASC",
+                    "WITH RECURSIVE chain(sid) AS ("
+                    "  SELECT ? AS sid"
+                    "  UNION ALL"
+                    "  SELECT parent.id"
+                    "    FROM chain c"
+                    "    JOIN sessions child  ON child.id = c.sid"
+                    "    JOIN sessions parent ON parent.id = child.parent_session_id"
+                    "   WHERE parent.end_reason = 'model_switch'"
+                    ")"
+                    " SELECT m.* FROM messages m"
+                    " JOIN chain ON m.session_id = chain.sid"
+                    f" WHERE 1=1{active_clause}"
+                    " ORDER BY m.id ASC",
                     [session_id],
                 )
                 all_rows = cursor.fetchall()
