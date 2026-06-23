@@ -3297,8 +3297,7 @@ def switch_model(
                     carry_over_context=True,
                 )
             except Exception as _split_exc:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
+                logger.warning(
                     "Session split on model switch failed (non-fatal): %s",
                     _split_exc,
                 )
