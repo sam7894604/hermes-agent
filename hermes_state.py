@@ -7971,14 +7971,35 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         ``after_id`` enables keyset pagination (``id > after_id``): O(1)
         page seeks on huge transcripts where OFFSET degrades to O(n) per
         page. Ascending order only (incompatible with ``latest``/``offset``).
+
+        When the current session was created by a ``model_switch`` split,
+        messages from ancestor sessions in the model-switch chain are
+        included automatically so that conversational context survives
+        across model changes.  The chain stops at the first ancestor whose
+        ``end_reason`` is not ``'model_switch'`` (or has no parent).
         """
         if after_id is not None and (latest or offset):
             raise ValueError("after_id is incompatible with latest/offset paging")
         active_clause = "" if include_inactive else " AND active = 1"
-        keyset_clause = " AND id > ?" if after_id is not None else ""
+        keyset_clause = " AND m.id > ?" if after_id is not None else ""
+        # Follow the model_switch parent chain (fork context-continuity fix)
+        # so conversation survives model changes, while still honoring the
+        # upstream keyset/LIMIT/OFFSET paging. The CTE's single ``?`` (sid
+        # seed) is the first param; after_id then LIMIT/OFFSET follow.
         sql = (
-            "SELECT * FROM messages WHERE session_id = ?"
-            f"{active_clause}{keyset_clause} ORDER BY id {'DESC' if latest else 'ASC'}"
+            "WITH RECURSIVE chain(sid) AS ("
+            "  SELECT ? AS sid"
+            "  UNION ALL"
+            "  SELECT parent.id"
+            "    FROM chain c"
+            "    JOIN sessions child  ON child.id = c.sid"
+            "    JOIN sessions parent ON parent.id = child.parent_session_id"
+            "   WHERE parent.end_reason = 'model_switch'"
+            ")"
+            " SELECT m.* FROM messages m"
+            " JOIN chain ON m.session_id = chain.sid"
+            f" WHERE 1=1{active_clause}{keyset_clause}"
+            f" ORDER BY m.id {'DESC' if latest else 'ASC'}"
         )
         params: list = [session_id]
         if after_id is not None:
