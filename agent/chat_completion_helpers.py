@@ -2292,6 +2292,43 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # short-circuit the freshly activated fallback before it gets a
         # single stream attempt.
         _reset_stale_streak(agent)
+
+        # ── Split session when fallback changes model ──
+        # Only split if the model actually changed (provider key rotation
+        # with the same model should not create a new session row).
+        _old_m = (old_model or '').strip().lower()
+        _new_m = (fb_model or '').strip().lower()
+        if _old_m != _new_m:
+            _session_db = getattr(agent, '_session_db', None)
+            _old_sess_id = getattr(agent, 'session_id', None)
+            if _session_db is not None and _old_sess_id:
+                import uuid
+                _new_sess_id = f"{_old_sess_id.split('_')[0]}_{uuid.uuid4().hex[:8]}"
+                try:
+                    _session_db.split_session(
+                        _old_sess_id,
+                        _new_sess_id,
+                        model=fb_model,
+                        billing_provider=fb_provider,
+                        billing_base_url=fb_base_url,
+                        billing_mode=getattr(agent, 'api_mode', None),
+                        source=getattr(agent, 'platform', None),
+                        user_id=getattr(agent, 'user_id', None),
+                        cwd=getattr(agent, 'cwd', None),
+                    )
+                    agent.session_id = _new_sess_id
+                    agent._transition_context_engine_session(
+                        old_session_id=_old_sess_id,
+                        new_session_id=_new_sess_id,
+                        carry_over_context=True,
+                    )
+                except Exception as _split_exc:
+                    logger.warning(
+                        "Session split on fallback failed (non-fatal): %s",
+                        _split_exc,
+                    )
+        # ──────────────────────────────────────────────────
+
         return True
     except Exception as e:
         if fb_provider == "nous":
