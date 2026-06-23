@@ -6245,11 +6245,32 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         pagination for the API endpoint to avoid loading entire transcripts.
         ``offset`` alone (without ``limit``) also pages — SQLite requires a
         LIMIT clause for OFFSET, so it's emitted as ``LIMIT -1`` (unbounded).
+
+        When the current session was created by a ``model_switch`` split,
+        messages from ancestor sessions in the model-switch chain are
+        included automatically so that conversational context survives
+        across model changes.  The chain stops at the first ancestor whose
+        ``end_reason`` is not ``'model_switch'`` (or has no parent).
         """
         active_clause = "" if include_inactive else " AND active = 1"
+        # Follow the model_switch parent chain (fork context-continuity fix)
+        # so conversation survives model changes, while still honoring the
+        # upstream pagination LIMIT/OFFSET. The CTE's single ``?`` (sid seed)
+        # is the first param; LIMIT/OFFSET params are appended after it.
         sql = (
-            "SELECT * FROM messages WHERE session_id = ?"
-            f"{active_clause} ORDER BY id"
+            "WITH RECURSIVE chain(sid) AS ("
+            "  SELECT ? AS sid"
+            "  UNION ALL"
+            "  SELECT parent.id"
+            "    FROM chain c"
+            "    JOIN sessions child  ON child.id = c.sid"
+            "    JOIN sessions parent ON parent.id = child.parent_session_id"
+            "   WHERE parent.end_reason = 'model_switch'"
+            ")"
+            " SELECT m.* FROM messages m"
+            " JOIN chain ON m.session_id = chain.sid"
+            f" WHERE 1=1{active_clause}"
+            " ORDER BY m.id"
         )
         params: list = [session_id]
         if limit is not None or offset:
