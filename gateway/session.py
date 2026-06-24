@@ -3401,7 +3401,7 @@ class SessionStore:
             # would otherwise re-trigger the pre-request repair on every
             # request forever — heal it once at the restore boundary.
             return self._db.get_messages_as_conversation(
-                session_id, repair_alternation=True
+                session_id, repair_alternation=True, include_ancestors=True
             )
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
