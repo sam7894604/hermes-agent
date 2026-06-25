@@ -234,6 +234,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("wake", "Toggle the 'Hey Hermes' wake word listener", "Configuration",
                cli_only=True, args_hint="[on|off|status]",
                subcommands=("on", "off", "status")),
+    CommandDef("tokens", "Toggle a per-message token breakdown footer on replies", "Configuration",
+               args_hint="[on|off|status]", subcommands=("on", "off", "status")),
     CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
                cli_only=True, args_hint="[queue|steer|interrupt|status]",
                subcommands=("queue", "steer", "interrupt", "status")),
@@ -654,6 +656,7 @@ _TELEGRAM_MENU_PRIORITY = (
     # Lower-priority but still useful operational built-ins.
     "reasoning",
     "usage",
+    "tokens",
     "platforms",
     "platform",
     "profile",
