@@ -110,6 +110,34 @@ describe('buildToolView file edit diffs', () => {
   })
 })
 
+describe('buildToolView title actions', () => {
+  it('marks the pending action separately from the rest of the title', () => {
+    const read = buildToolView(part({ args: { path: '/tmp/demo.txt' }, result: undefined, toolName: 'read_file' }), '')
+    const web = buildToolView(
+      part({ args: { url: 'https://example.com/docs' }, result: undefined, toolName: 'web_extract' }),
+      ''
+    )
+    const terminal = buildToolView(
+      part({ args: { command: 'npm test -- --runInBand' }, result: undefined, toolName: 'terminal' }),
+      ''
+    )
+
+    expect(read.title).toBe('Reading file')
+    expect(read.titleAction).toBe('Reading')
+    expect(web.title).toBe('Reading example.com')
+    expect(web.titleAction).toBe('Reading')
+    expect(terminal.title).toBe('Running · npm test -- --runInBand')
+    expect(terminal.titleAction).toBe('Running')
+  })
+
+  it('does not mark completed tool titles as pending actions', () => {
+    const view = buildToolView(part({ args: { url: 'https://example.com/docs' }, toolName: 'web_extract' }), '')
+
+    expect(view.title).toBe('Read example.com')
+    expect(view.titleAction).toBeUndefined()
+  })
+})
+
 describe('countDiffLineStats', () => {
   it('counts added and removed lines', () => {
     expect(

@@ -202,6 +202,41 @@ function LinkifiedText({ className, text }: { className?: string; text: string }
   return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
 }
 
+function ToolTitle({
+  isPending,
+  status,
+  title,
+  titleAction
+}: {
+  isPending: boolean
+  status: ToolStatus
+  title: string
+  titleAction?: string
+}) {
+  const action = isPending && titleAction && title.startsWith(titleAction) ? titleAction : ''
+  const rest = action ? title.slice(action.length) : ''
+
+  return (
+    <FadeText
+      className={cn(
+        TOOL_HEADER_TITLE_CLASS,
+        isPending && 'text-(--ui-text-tertiary)',
+        status === 'error' && 'text-destructive',
+        status === 'warning' && 'text-amber-700 dark:text-amber-300'
+      )}
+    >
+      {action ? (
+        <>
+          <span className="shimmer">{action}</span>
+          {rest}
+        </>
+      ) : (
+        title
+      )}
+    </FadeText>
+  )
+}
+
 interface ToolEntryProps {
   part: ToolPart
 }
@@ -398,16 +433,12 @@ function ToolEntry({ part }: ToolEntryProps) {
               icon={view.icon}
               status={leadingStatus(isPending, view.status)}
             />
-            <FadeText
-              className={cn(
-                TOOL_HEADER_TITLE_CLASS,
-                isPending && 'shimmer text-(--ui-text-tertiary)',
-                view.status === 'error' && 'text-destructive',
-                view.status === 'warning' && 'text-amber-700 dark:text-amber-300'
-              )}
-            >
-              {view.title}
-            </FadeText>
+            <ToolTitle
+              isPending={isPending}
+              status={view.status}
+              title={view.title}
+              titleAction={view.titleAction}
+            />
             {!isPending && view.countLabel && <span className={TOOL_HEADER_DURATION_CLASS}>{view.countLabel}</span>}
             {showDiffStats && diffStats && (
               <span className="flex shrink-0 items-center gap-1 font-mono text-[0.625rem] tabular-nums">

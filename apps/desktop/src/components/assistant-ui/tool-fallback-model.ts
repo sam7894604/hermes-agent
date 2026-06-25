@@ -51,6 +51,7 @@ export interface ToolView {
   status: ToolStatus
   subtitle: string
   title: string
+  titleAction?: string
   tone: ToolTone
 }
 
@@ -58,6 +59,7 @@ interface ToolMeta {
   done: string
   icon?: string
   pending: string
+  pendingAction: string
   tone: ToolTone
 }
 
@@ -113,43 +115,118 @@ function fileEditBasename(path: string): string {
 }
 
 const TOOL_META: Record<string, ToolMeta> = {
-  browser_click: { done: 'Clicked page element', pending: 'Clicking page element', icon: 'globe', tone: 'browser' },
-  browser_fill: { done: 'Filled form field', pending: 'Filling form field', icon: 'globe', tone: 'browser' },
-  browser_navigate: { done: 'Opened page', pending: 'Opening page', icon: 'globe', tone: 'browser' },
+  browser_click: {
+    done: 'Clicked page element',
+    pending: 'Clicking page element',
+    pendingAction: 'Clicking',
+    icon: 'globe',
+    tone: 'browser'
+  },
+  browser_fill: {
+    done: 'Filled form field',
+    pending: 'Filling form field',
+    pendingAction: 'Filling',
+    icon: 'globe',
+    tone: 'browser'
+  },
+  browser_navigate: {
+    done: 'Opened page',
+    pending: 'Opening page',
+    pendingAction: 'Opening',
+    icon: 'globe',
+    tone: 'browser'
+  },
   browser_snapshot: {
     done: 'Captured page snapshot',
     pending: 'Capturing page snapshot',
+    pendingAction: 'Capturing',
     icon: 'globe',
     tone: 'browser'
   },
   browser_take_screenshot: {
     done: 'Captured screenshot',
     pending: 'Capturing screenshot',
+    pendingAction: 'Capturing',
     icon: 'file-media',
     tone: 'browser'
   },
-  browser_type: { done: 'Typed on page', pending: 'Typing on page', icon: 'globe', tone: 'browser' },
-  clarify: { done: 'Asked a question', pending: 'Asking a question', icon: 'question', tone: 'agent' },
-  cronjob: { done: 'Cron job', pending: 'Scheduling cron job', icon: 'watch', tone: 'agent' },
-  edit_file: { done: 'Edited file', pending: 'Editing file', icon: 'edit', tone: 'file' },
-  execute_code: { done: 'Ran code', pending: 'Running code', icon: 'terminal', tone: 'terminal' },
-  image_generate: { done: 'Generated image', pending: 'Generating image', icon: 'file-media', tone: 'image' },
-  list_files: { done: 'Listed files', pending: 'Listing files', icon: 'files', tone: 'file' },
-  patch: { done: 'Patched file', pending: 'Patching file', icon: 'edit', tone: 'file' },
-  read_file: { done: 'Read file', pending: 'Reading file', icon: 'file', tone: 'file' },
-  search_files: { done: 'Searched files', pending: 'Searching files', icon: 'search', tone: 'file' },
+  browser_type: {
+    done: 'Typed on page',
+    pending: 'Typing on page',
+    pendingAction: 'Typing',
+    icon: 'globe',
+    tone: 'browser'
+  },
+  clarify: {
+    done: 'Asked a question',
+    pending: 'Asking a question',
+    pendingAction: 'Asking',
+    icon: 'question',
+    tone: 'agent'
+  },
+  cronjob: {
+    done: 'Cron job',
+    pending: 'Scheduling cron job',
+    pendingAction: 'Scheduling',
+    icon: 'watch',
+    tone: 'agent'
+  },
+  edit_file: { done: 'Edited file', pending: 'Editing file', pendingAction: 'Editing', icon: 'edit', tone: 'file' },
+  execute_code: {
+    done: 'Ran code',
+    pending: 'Running code',
+    pendingAction: 'Running code',
+    icon: 'terminal',
+    tone: 'terminal'
+  },
+  image_generate: {
+    done: 'Generated image',
+    pending: 'Generating image',
+    pendingAction: 'Generating',
+    icon: 'file-media',
+    tone: 'image'
+  },
+  list_files: {
+    done: 'Listed files',
+    pending: 'Listing files',
+    pendingAction: 'Listing',
+    icon: 'files',
+    tone: 'file'
+  },
+  patch: { done: 'Patched file', pending: 'Patching file', pendingAction: 'Patching', icon: 'edit', tone: 'file' },
+  read_file: { done: 'Read file', pending: 'Reading file', pendingAction: 'Reading', icon: 'file', tone: 'file' },
+  search_files: {
+    done: 'Searched files',
+    pending: 'Searching files',
+    pendingAction: 'Searching',
+    icon: 'search',
+    tone: 'file'
+  },
   session_search_recall: {
     done: 'Searched session history',
     pending: 'Searching session history',
+    pendingAction: 'Searching',
     icon: 'search',
     tone: 'agent'
   },
-  terminal: { done: 'Ran command', pending: 'Running command', icon: 'terminal', tone: 'terminal' },
-  todo: { done: 'Updated todos', pending: 'Updating todos', icon: 'tools', tone: 'agent' },
-  vision_analyze: { done: 'Analyzed image', pending: 'Analyzing image', icon: 'eye', tone: 'image' },
-  web_extract: { done: 'Read webpage', pending: 'Reading webpage', icon: 'globe', tone: 'web' },
-  web_search: { done: 'Searched web', pending: 'Searching web', icon: 'search', tone: 'web' },
-  write_file: { done: 'Edited file', pending: 'Editing file', icon: 'edit', tone: 'file' }
+  terminal: {
+    done: 'Ran command',
+    pending: 'Running command',
+    pendingAction: 'Running',
+    icon: 'terminal',
+    tone: 'terminal'
+  },
+  todo: { done: 'Updated todos', pending: 'Updating todos', pendingAction: 'Updating', icon: 'tools', tone: 'agent' },
+  vision_analyze: {
+    done: 'Analyzed image',
+    pending: 'Analyzing image',
+    pendingAction: 'Analyzing',
+    icon: 'eye',
+    tone: 'image'
+  },
+  web_extract: { done: 'Read webpage', pending: 'Reading webpage', pendingAction: 'Reading', icon: 'globe', tone: 'web' },
+  web_search: { done: 'Searched web', pending: 'Searching web', pendingAction: 'Searching', icon: 'search', tone: 'web' },
+  write_file: { done: 'Edited file', pending: 'Editing file', pendingAction: 'Editing', icon: 'edit', tone: 'file' }
 }
 
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
@@ -188,10 +265,11 @@ function toolMeta(name: string): ToolMeta {
     ? {
         done: `${prefix.verb} ${action}`,
         pending: `Running ${prefix.verb.toLowerCase()} ${action.toLowerCase()}`,
+        pendingAction: 'Running',
         icon: prefix.icon,
         tone: prefix.tone
       }
-    : { done: action, pending: `Running ${action.toLowerCase()}`, tone: 'default' }
+    : { done: action, pending: `Running ${action.toLowerCase()}`, pendingAction: 'Running', tone: 'default' }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1341,39 +1419,51 @@ export function toolCopyPayload(part: ToolPart, view: ToolView): { label: string
   return { label: copy.generic, text: view.title }
 }
 
+interface ToolTitleParts {
+  action?: string
+  title: string
+}
+
 function dynamicTitle(
   part: ToolPart,
   args: Record<string, unknown>,
   result: Record<string, unknown>,
-  fallback: string
-): string {
+  fallback: ToolTitleParts
+): ToolTitleParts {
   const verb = (gerund: string, past: string) => (part.result === undefined ? gerund : past)
+  const titledAction = (action: string, rest: string): ToolTitleParts => ({
+    action: part.result === undefined ? action : undefined,
+    title: `${action}${rest}`
+  })
 
   if (part.toolName === 'web_extract') {
     const url = findFirstUrl(args, result)
+    const action = verb('Reading', 'Read')
 
-    return url ? `${verb('Reading', 'Read')} ${hostnameOf(url)}` : fallback
+    return url ? titledAction(action, ` ${hostnameOf(url)}`) : fallback
   }
 
   if (part.toolName === 'browser_navigate') {
     const url = findFirstUrl(args, result)
+    const action = verb('Opening', 'Opened')
 
-    return url ? `${verb('Opening', 'Opened')} ${hostnameOf(url)}` : fallback
+    return url ? titledAction(action, ` ${hostnameOf(url)}`) : fallback
   }
 
   if (part.toolName === 'web_search') {
     const query = firstStringField(args, ['search_term', 'query']) || contextValue(args)
+    const action = verb('Searching', 'Searched')
 
-    return query ? `${verb('Searching', 'Searched')} “${compactPreview(query, 48)}”` : fallback
+    return query ? titledAction(action, ` “${compactPreview(query, 48)}”`) : fallback
   }
 
   if (part.toolName === 'terminal' || part.toolName === 'execute_code') {
     const command = firstStringField(args, ['command', 'code']) || contextValue(args)
 
     if (command) {
-      const verbText = part.toolName === 'execute_code' ? verb('Running code', 'Ran code') : verb('Running', 'Ran')
+      const action = part.toolName === 'execute_code' ? verb('Running code', 'Ran code') : verb('Running', 'Ran')
 
-      return `${verbText} · ${compactPreview(command, 160)}`
+      return titledAction(action, ` · ${compactPreview(command, 160)}`)
     }
   }
 
@@ -1381,7 +1471,7 @@ function dynamicTitle(
     const path = fileEditPath(args, result)
 
     if (path) {
-      return fileEditBasename(path)
+      return { title: fileEditBasename(path) }
     }
   }
 
@@ -1395,7 +1485,11 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const status = toolStatus(part, resultRecord)
   const error = toolErrorText(part, resultRecord)
   const baseTitle = part.result === undefined ? meta.pending : meta.done
-  const title = dynamicTitle(part, argsRecord, resultRecord, baseTitle)
+  const titleParts = dynamicTitle(part, argsRecord, resultRecord, {
+    action: part.result === undefined ? meta.pendingAction : undefined,
+    title: baseTitle
+  })
+  const title = titleParts.title
   const titleEnriched = title !== baseTitle
   const baseSubtitle = error || toolSubtitle(part, argsRecord, resultRecord)
 
@@ -1449,6 +1543,7 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     status,
     subtitle,
     title,
+    titleAction: titleParts.action,
     tone: meta.tone
   }
 }
