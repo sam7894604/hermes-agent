@@ -2217,6 +2217,10 @@ class AIAgent:
                     compression_lock_holder=getattr(
                         self, "_active_compression_lock_holder", None
                     ),
+                    # Bit-packed per-message token accounting (hermes_token_codec):
+                    # assistant rows carry (output, reasoning); user/tool prompt
+                    # rows carry (total_input, cache_read). Negative = packed.
+                    token_count=msg.get("token_count"),
                 )
                 msg[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the
