@@ -223,7 +223,9 @@ class SessionPortabilityMixin:
         session = self.get_session(session_id)
         if not session:
             return None
-        messages = self.get_messages(session_id)
+        # Backup must round-trip losslessly: keep the raw bit-packed
+        # token_count rather than the flattened display view.
+        messages = self.get_messages(session_id, flatten_tokens=False)
         return {**session, "messages": messages}
 
     def export_session_lineage(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -254,7 +256,8 @@ class SessionPortabilityMixin:
         sessions = self.search_sessions(source=source, limit=100000)
         results = []
         for session in sessions:
-            messages = self.get_messages(session["id"])
+            # Lossless backup — keep raw packed token_count (see export_session).
+            messages = self.get_messages(session["id"], flatten_tokens=False)
             results.append({**session, "messages": messages})
         return results
 
