@@ -215,6 +215,7 @@ export const applyDisplay = (
     sections: resolveSections(d.sections),
     showCost: !!d.show_cost,
     showReasoning: !!d.show_reasoning,
+    showTokens: !!d.show_message_tokens,
     statusBar: normalizeStatusBar(d.tui_statusbar),
     streaming: d.streaming !== false
   })
