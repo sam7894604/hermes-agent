@@ -313,7 +313,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="[on|off|status]",
                subcommands=("on", "off", "status")),
     CommandDef("tokens", "Toggle a per-message token breakdown footer on replies", "Configuration",
-               args_hint="[on|off|status]", subcommands=("on", "off", "status")),
+               args_hint="[on|off|always|status]", subcommands=("on", "off", "always", "status")),
     CommandDef("busy", "Control how messages behave while Hermes is working", "Configuration",
                args_hint="[queue|steer|interrupt|status]",
                subcommands=("queue", "steer", "interrupt", "status"),
