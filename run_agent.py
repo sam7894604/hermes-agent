@@ -2290,6 +2290,10 @@ class AIAgent:
                     compression_lock_holder=getattr(
                         self, "_active_compression_lock_holder", None
                     ),
+                    # Bit-packed per-message token accounting (hermes_token_codec):
+                    # assistant rows carry (output, reasoning); user/tool prompt
+                    # rows carry (total_input, cache_read). Negative = packed.
+                    token_count=msg.get("token_count"),
                 )
                 for _written in _batch_msgs:
                     _written[_DB_PERSISTED_MARKER] = True
