@@ -2466,6 +2466,36 @@ def _row_to_token_totals(row) -> Dict[str, int]:
     }
 
 
+_TOKEN_VIEW_UNSET = object()
+
+
+def _attach_token_view(msg: Dict[str, Any], raw_token_count: Any = _TOKEN_VIEW_UNSET) -> Dict[str, Any]:
+    """Flatten a message's bit-packed ``token_count`` into a readable view.
+
+    The stored ``token_count`` is bit-packed and **negative** for packed rows
+    (see :mod:`hermes_token_codec`); dashboard / API / TUI consumers that read
+    it off these getters would otherwise see a raw negative sentinel. Attach
+    the resolved ``{input, output, cache_read, reasoning}`` buckets under
+    ``tokens``, and — when the dict still carries a scalar ``token_count`` —
+    replace it with a legacy-safe non-negative value (assistant output count,
+    else ``None``) so nothing surfaces the packed sentinel.
+
+    ``raw_token_count`` lets callers whose row dict omits the column (e.g. the
+    conversation-replay getter, which never selected ``token_count``) pass the
+    value explicitly; in that case no scalar ``token_count`` key is added, so
+    replay dicts stay clean.
+    """
+    from hermes_token_codec import resolve_message_tokens
+
+    role = msg.get("role")
+    raw = msg.get("token_count") if raw_token_count is _TOKEN_VIEW_UNSET else raw_token_count
+    tokens = resolve_message_tokens(role, raw)
+    msg["tokens"] = tokens
+    if "token_count" in msg:
+        msg["token_count"] = tokens["output"] if role == "assistant" else None
+    return msg
+
+
 class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin):
     """
     SQLite-backed session storage with FTS5 search.
@@ -8400,6 +8430,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         offset: int = 0,
         latest: bool = False,
         after_id: Optional[int] = None,
+        flatten_tokens: bool = True,
     ) -> List[Dict[str, Any]]:
         """Load messages for a session in insertion order.
 
@@ -8407,6 +8438,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         ``include_inactive=True`` to load soft-deleted rows (e.g. for
         audit / debug views of rewound history). See
         :meth:`rewind_to_message` for the soft-delete mechanic.
+
+        By default (``flatten_tokens=True``) each row's bit-packed
+        ``token_count`` is flattened for display: a readable ``tokens``
+        bucket dict is attached and the scalar ``token_count`` is reduced to
+        a legacy-safe non-negative value, so dashboard / TUI / search
+        consumers never read the raw negative packed sentinel. Pass
+        ``flatten_tokens=False`` to keep the raw packed value untouched —
+        required by re-persist paths (fork / transcript rewrite) that write
+        these dicts back via :meth:`replace_messages`, so packed token
+        accounting survives the round-trip.
 
         Ordered by AUTOINCREMENT id (true insertion order) rather than
         timestamp — see c03acca50 for the WSL2 clock-regression rationale.
@@ -8478,6 +8519,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     msg["tool_calls"] = []
             if msg.get("display_metadata") is not None:
                 msg["display_metadata"] = self._decode_display_metadata(msg["display_metadata"])
+            # Flatten the bit-packed token_count so callers never read the raw
+            # negative packed sentinel (dashboard / search / export consumers).
+            # Re-persist callers pass flatten_tokens=False to keep raw values.
+            if flatten_tokens:
+                _attach_token_view(msg)
             result.append(msg)
         return result
 
@@ -8805,7 +8851,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         "id, role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
         "finish_reason, reasoning, reasoning_content, reasoning_details, "
         "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp, "
-        "api_content, display_kind, display_metadata"
+        "api_content, display_kind, display_metadata, token_count"
     )
 
     def _rows_to_conversation(
@@ -8903,6 +8949,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     except (json.JSONDecodeError, TypeError):
                         logger.warning("Failed to deserialize codex_message_items, falling back to None")
                         msg["codex_message_items"] = None
+            # Surface a flattened, readable token view for display consumers
+            # (TUI / ACP / API history). Pass the raw column explicitly so no
+            # scalar token_count is added to the replay dict — it stays clean,
+            # and the `tokens` key is stripped before any provider call.
+            _attach_token_view(msg, raw_token_count=row["token_count"])
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
             messages.append(msg)
