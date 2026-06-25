@@ -2041,7 +2041,7 @@ export const ja = defineLocale({
         ran: '実行完了',
         running: '実行中',
         ranCode: 'コード実行完了',
-        runningCode: 'コード実行中'
+        runningCode: 'スクリプト作成中'
       },
       prefixes: {
         browser: 'ブラウザー',
@@ -2077,7 +2077,7 @@ export const ja = defineLocale({
         clarify: { done: '質問しました', pending: '質問中', pendingAction: '質問中' },
         cronjob: { done: 'Cron ジョブ', pending: 'Cron ジョブをスケジュール中', pendingAction: 'スケジュール中' },
         edit_file: { done: 'ファイルを編集しました', pending: 'ファイルを編集中', pendingAction: '編集中' },
-        execute_code: { done: 'コードを実行しました', pending: 'コード実行中', pendingAction: 'コード実行中' },
+        execute_code: { done: 'コードを実行しました', pending: 'スクリプト作成中', pendingAction: 'スクリプト作成中' },
         image_generate: { done: '画像を生成しました', pending: '画像を生成中', pendingAction: '生成中' },
         list_files: {
           done: 'ファイルを一覧表示しました',

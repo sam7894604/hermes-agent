@@ -1913,7 +1913,7 @@ export const en: Translations = {
         ran: 'Ran',
         running: 'Running',
         ranCode: 'Ran code',
-        runningCode: 'Running code'
+        runningCode: 'Scripting'
       },
       prefixes: {
         browser: 'Browser',
@@ -1945,7 +1945,7 @@ export const en: Translations = {
         clarify: { done: 'Asked a question', pending: 'Asking a question', pendingAction: 'Asking' },
         cronjob: { done: 'Cron job', pending: 'Scheduling cron job', pendingAction: 'Scheduling' },
         edit_file: { done: 'Edited file', pending: 'Editing file', pendingAction: 'Editing' },
-        execute_code: { done: 'Ran code', pending: 'Running code', pendingAction: 'Running code' },
+        execute_code: { done: 'Ran code', pending: 'Scripting', pendingAction: 'Scripting' },
         image_generate: { done: 'Generated image', pending: 'Generating image', pendingAction: 'Generating' },
         list_files: { done: 'Listed files', pending: 'Listing files', pendingAction: 'Listing' },
         patch: { done: 'Patched file', pending: 'Patching file', pendingAction: 'Patching' },

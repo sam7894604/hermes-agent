@@ -1981,7 +1981,7 @@ export const zhHant = defineLocale({
         ran: '已執行',
         running: '正在執行',
         ranCode: '已執行程式碼',
-        runningCode: '正在執行程式碼'
+        runningCode: '正在撰寫腳本'
       },
       prefixes: {
         browser: '瀏覽器',
@@ -2005,7 +2005,7 @@ export const zhHant = defineLocale({
         clarify: { done: '已提問', pending: '正在提問', pendingAction: '正在提問' },
         cronjob: { done: 'Cron 工作', pending: '正在安排 Cron 工作', pendingAction: '正在安排' },
         edit_file: { done: '已編輯檔案', pending: '正在編輯檔案', pendingAction: '正在編輯' },
-        execute_code: { done: '已執行程式碼', pending: '正在執行程式碼', pendingAction: '正在執行程式碼' },
+        execute_code: { done: '已執行程式碼', pending: '正在撰寫腳本', pendingAction: '正在撰寫腳本' },
         image_generate: { done: '已生成圖片', pending: '正在生成圖片', pendingAction: '正在生成' },
         list_files: { done: '已列出檔案', pending: '正在列出檔案', pendingAction: '正在列出' },
         patch: { done: '已修補檔案', pending: '正在修補檔案', pendingAction: '正在修補' },

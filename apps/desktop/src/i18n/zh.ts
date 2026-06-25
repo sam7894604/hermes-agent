@@ -2089,7 +2089,7 @@ export const zh: Translations = {
         ran: '已运行',
         running: '正在运行',
         ranCode: '已运行代码',
-        runningCode: '正在运行代码'
+        runningCode: '正在编写脚本'
       },
       prefixes: {
         browser: '浏览器',
@@ -2113,7 +2113,7 @@ export const zh: Translations = {
         clarify: { done: '已提问', pending: '正在提问', pendingAction: '正在提问' },
         cronjob: { done: 'Cron 任务', pending: '正在安排 Cron 任务', pendingAction: '正在安排' },
         edit_file: { done: '已编辑文件', pending: '正在编辑文件', pendingAction: '正在编辑' },
-        execute_code: { done: '已运行代码', pending: '正在运行代码', pendingAction: '正在运行代码' },
+        execute_code: { done: '已运行代码', pending: '正在编写脚本', pendingAction: '正在编写脚本' },
         image_generate: { done: '已生成图片', pending: '正在生成图片', pendingAction: '正在生成' },
         list_files: { done: '已列出文件', pending: '正在列出文件', pendingAction: '正在列出' },
         patch: { done: '已修补文件', pending: '正在修补文件', pendingAction: '正在修补' },

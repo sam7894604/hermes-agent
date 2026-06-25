@@ -124,12 +124,19 @@ describe('buildToolView title actions', () => {
       ''
     )
 
+    const code = buildToolView(
+      part({ args: { code: 'print("hello")' }, result: undefined, toolName: 'execute_code' }),
+      ''
+    )
+
     expect(read.title).toBe('Reading file')
     expect(read.titleAction).toEqual({ prefix: '', text: 'Reading', suffix: ' file' })
     expect(web.title).toBe('Reading example.com/docs')
     expect(web.titleAction).toEqual({ prefix: '', text: 'Reading', suffix: ' example.com/docs' })
     expect(terminal.title).toBe('Running · npm test -- --runInBand')
     expect(terminal.titleAction).toEqual({ prefix: '', text: 'Running', suffix: ' · npm test -- --runInBand' })
+    expect(code.title).toBe('Scripting · print("hello")')
+    expect(code.titleAction).toEqual({ prefix: '', text: 'Scripting', suffix: ' · print("hello")' })
   })
 
   it('does not mark completed tool titles as pending actions', () => {
