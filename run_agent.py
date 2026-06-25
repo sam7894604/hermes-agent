@@ -2266,8 +2266,16 @@ class AIAgent:
             # Drain async token-accounting deltas at every persist point (turn
             # finalize + error exits) so a crash after this line loses at most
             # the in-flight API call's delta. Cheap no-op when nothing queued.
+            # getattr-guarded: upstream hands this path DB wrappers and test
+            # doubles that don't implement the fork's async token-accounting
+            # drain. Same defensive shape as agent/insights.py — an absent
+            # method must never abort the persist it is riding along with.
             if self._session_db is not None:
-                self._session_db.flush_token_counts()
+                _flush_counts = getattr(
+                    self._session_db, "flush_token_counts", None
+                )
+                if callable(_flush_counts):
+                    _flush_counts()
             note_turn_persisted(self)
 
         if persist_lock is None:
@@ -2578,6 +2586,12 @@ class AIAgent:
                 _row = {
                     "role": role,
                     "content": content,
+                    # Bit-packed per-message token accounting (hermes_token_codec):
+                    # assistant rows carry (output, reasoning); user/tool prompt
+                    # rows carry (total_input, cache_read). Negative = packed.
+                    # Per-ROW, not per-batch: _insert_message_rows reads it off
+                    # each dict, so every message keeps its own counts.
+                    "token_count": msg.get("token_count"),
                     "tool_name": msg.get("tool_name"),
                     "tool_calls": tool_calls_data,
                     "tool_call_id": msg.get("tool_call_id"),
