@@ -52,6 +52,8 @@ export interface ToolView {
   subtitle: string
   title: string
   titleAction?: string
+  titleActionPrefix?: string
+  titleActionSuffix?: string
   tone: ToolTone
 }
 
@@ -60,6 +62,11 @@ interface ToolMeta {
   icon?: string
   pending: string
   pendingAction: string
+  tone: ToolTone
+}
+
+interface ToolMetaSpec {
+  icon?: string
   tone: ToolTone
 }
 
@@ -114,119 +121,74 @@ function fileEditBasename(path: string): string {
   return normalized.split('/').filter(Boolean).pop() || normalized
 }
 
-const TOOL_META: Record<string, ToolMeta> = {
+const TOOL_META: Record<string, ToolMetaSpec> = {
   browser_click: {
-    done: 'Clicked page element',
-    pending: 'Clicking page element',
-    pendingAction: 'Clicking',
     icon: 'globe',
     tone: 'browser'
   },
   browser_fill: {
-    done: 'Filled form field',
-    pending: 'Filling form field',
-    pendingAction: 'Filling',
     icon: 'globe',
     tone: 'browser'
   },
   browser_navigate: {
-    done: 'Opened page',
-    pending: 'Opening page',
-    pendingAction: 'Opening',
     icon: 'globe',
     tone: 'browser'
   },
   browser_snapshot: {
-    done: 'Captured page snapshot',
-    pending: 'Capturing page snapshot',
-    pendingAction: 'Capturing',
     icon: 'globe',
     tone: 'browser'
   },
   browser_take_screenshot: {
-    done: 'Captured screenshot',
-    pending: 'Capturing screenshot',
-    pendingAction: 'Capturing',
     icon: 'file-media',
     tone: 'browser'
   },
   browser_type: {
-    done: 'Typed on page',
-    pending: 'Typing on page',
-    pendingAction: 'Typing',
     icon: 'globe',
     tone: 'browser'
   },
   clarify: {
-    done: 'Asked a question',
-    pending: 'Asking a question',
-    pendingAction: 'Asking',
     icon: 'question',
     tone: 'agent'
   },
   cronjob: {
-    done: 'Cron job',
-    pending: 'Scheduling cron job',
-    pendingAction: 'Scheduling',
     icon: 'watch',
     tone: 'agent'
   },
-  edit_file: { done: 'Edited file', pending: 'Editing file', pendingAction: 'Editing', icon: 'edit', tone: 'file' },
+  edit_file: { icon: 'edit', tone: 'file' },
   execute_code: {
-    done: 'Ran code',
-    pending: 'Running code',
-    pendingAction: 'Running code',
     icon: 'terminal',
     tone: 'terminal'
   },
   image_generate: {
-    done: 'Generated image',
-    pending: 'Generating image',
-    pendingAction: 'Generating',
     icon: 'file-media',
     tone: 'image'
   },
   list_files: {
-    done: 'Listed files',
-    pending: 'Listing files',
-    pendingAction: 'Listing',
     icon: 'files',
     tone: 'file'
   },
-  patch: { done: 'Patched file', pending: 'Patching file', pendingAction: 'Patching', icon: 'edit', tone: 'file' },
-  read_file: { done: 'Read file', pending: 'Reading file', pendingAction: 'Reading', icon: 'file', tone: 'file' },
+  patch: { icon: 'edit', tone: 'file' },
+  read_file: { icon: 'file', tone: 'file' },
   search_files: {
-    done: 'Searched files',
-    pending: 'Searching files',
-    pendingAction: 'Searching',
     icon: 'search',
     tone: 'file'
   },
   session_search_recall: {
-    done: 'Searched session history',
-    pending: 'Searching session history',
-    pendingAction: 'Searching',
     icon: 'search',
     tone: 'agent'
   },
   terminal: {
-    done: 'Ran command',
-    pending: 'Running command',
-    pendingAction: 'Running',
     icon: 'terminal',
     tone: 'terminal'
   },
-  todo: { done: 'Updated todos', pending: 'Updating todos', pendingAction: 'Updating', icon: 'tools', tone: 'agent' },
+  todo: { icon: 'tools', tone: 'agent' },
   vision_analyze: {
-    done: 'Analyzed image',
-    pending: 'Analyzing image',
-    pendingAction: 'Analyzing',
     icon: 'eye',
     tone: 'image'
   },
-  web_extract: { done: 'Read webpage', pending: 'Reading webpage', pendingAction: 'Reading', icon: 'globe', tone: 'web' },
-  web_search: { done: 'Searched web', pending: 'Searching web', pendingAction: 'Searching', icon: 'search', tone: 'web' },
-  write_file: { done: 'Edited file', pending: 'Editing file', pendingAction: 'Editing', icon: 'edit', tone: 'file' }
+  web_extract: { icon: 'globe', tone: 'web' },
+  web_search: { icon: 'search', tone: 'web' },
+  write_file: { icon: 'edit', tone: 'file' }
 }
 
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
@@ -248,28 +210,45 @@ function titleForTool(name: string): string {
   )
 }
 
-const PREFIX_META: { icon?: string; prefix: string; tone: ToolTone; verb: string }[] = [
-  { prefix: 'browser_', verb: 'Browser', icon: 'globe', tone: 'browser' },
-  { prefix: 'web_', verb: 'Web', icon: 'globe', tone: 'web' }
+const PREFIX_META: { icon?: string; labelKey: string; prefix: string; tone: ToolTone }[] = [
+  { prefix: 'browser_', labelKey: 'browser', icon: 'globe', tone: 'browser' },
+  { prefix: 'web_', labelKey: 'web', icon: 'globe', tone: 'web' }
 ]
 
 function toolMeta(name: string): ToolMeta {
-  if (TOOL_META[name]) {
-    return TOOL_META[name]
+  const known = TOOL_META[name]
+
+  if (known) {
+    return {
+      done: translateNow(`assistant.tool.titles.${name}.done`),
+      pending: translateNow(`assistant.tool.titles.${name}.pending`),
+      pendingAction: translateNow(`assistant.tool.titles.${name}.pendingAction`),
+      icon: known.icon,
+      tone: known.tone
+    }
   }
 
   const action = titleForTool(name)
   const prefix = PREFIX_META.find(p => name.startsWith(p.prefix))
 
-  return prefix
-    ? {
-        done: `${prefix.verb} ${action}`,
-        pending: `Running ${prefix.verb.toLowerCase()} ${action.toLowerCase()}`,
-        pendingAction: 'Running',
-        icon: prefix.icon,
-        tone: prefix.tone
-      }
-    : { done: action, pending: `Running ${action.toLowerCase()}`, pendingAction: 'Running', tone: 'default' }
+  if (prefix) {
+    const prefixLabel = translateNow(`assistant.tool.prefixes.${prefix.labelKey}`)
+
+    return {
+      done: translateNow('assistant.tool.titleTemplates.prefixedDone', prefixLabel, action),
+      pending: translateNow('assistant.tool.titleTemplates.runningPrefixedTool', prefixLabel, action),
+      pendingAction: translateNow('assistant.tool.actions.running'),
+      icon: prefix.icon,
+      tone: prefix.tone
+    }
+  }
+
+  return {
+    done: action,
+    pending: translateNow('assistant.tool.titleTemplates.runningTool', action),
+    pendingAction: translateNow('assistant.tool.actions.running'),
+    tone: 'default'
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1421,7 +1400,28 @@ export function toolCopyPayload(part: ToolPart, view: ToolView): { label: string
 
 interface ToolTitleParts {
   action?: string
+  actionPrefix?: string
+  actionSuffix?: string
   title: string
+}
+
+function titlePartsFromAction(title: string, action?: string): ToolTitleParts {
+  if (!action) {
+    return { title }
+  }
+
+  const actionStart = title.indexOf(action)
+
+  if (actionStart < 0) {
+    return { action, title }
+  }
+
+  return {
+    action,
+    actionPrefix: title.slice(0, actionStart),
+    actionSuffix: title.slice(actionStart + action.length),
+    title
+  }
 }
 
 function dynamicTitle(
@@ -1431,39 +1431,54 @@ function dynamicTitle(
   fallback: ToolTitleParts
 ): ToolTitleParts {
   const verb = (gerund: string, past: string) => (part.result === undefined ? gerund : past)
-  const titledAction = (action: string, rest: string): ToolTitleParts => ({
-    action: part.result === undefined ? action : undefined,
-    title: `${action}${rest}`
-  })
+  const titledAction = (action: string, title: string): ToolTitleParts =>
+    titlePartsFromAction(title, part.result === undefined ? action : undefined)
 
   if (part.toolName === 'web_extract') {
     const url = findFirstUrl(args, result)
-    const action = verb('Reading', 'Read')
+    const action = verb(
+      translateNow('assistant.tool.actions.reading'),
+      translateNow('assistant.tool.actions.read')
+    )
 
-    return url ? titledAction(action, ` ${hostnameOf(url)}`) : fallback
+    return url ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url))) : fallback
   }
 
   if (part.toolName === 'browser_navigate') {
     const url = findFirstUrl(args, result)
-    const action = verb('Opening', 'Opened')
+    const action = verb(
+      translateNow('assistant.tool.actions.opening'),
+      translateNow('assistant.tool.actions.opened')
+    )
 
-    return url ? titledAction(action, ` ${hostnameOf(url)}`) : fallback
+    return url ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url))) : fallback
   }
 
   if (part.toolName === 'web_search') {
     const query = firstStringField(args, ['search_term', 'query']) || contextValue(args)
-    const action = verb('Searching', 'Searched')
+    const action = verb(
+      translateNow('assistant.tool.actions.searching'),
+      translateNow('assistant.tool.actions.searched')
+    )
 
-    return query ? titledAction(action, ` “${compactPreview(query, 48)}”`) : fallback
+    return query
+      ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionQuoted', action, compactPreview(query, 48)))
+      : fallback
   }
 
   if (part.toolName === 'terminal' || part.toolName === 'execute_code') {
     const command = firstStringField(args, ['command', 'code']) || contextValue(args)
 
     if (command) {
-      const action = part.toolName === 'execute_code' ? verb('Running code', 'Ran code') : verb('Running', 'Ran')
+      const action =
+        part.toolName === 'execute_code'
+          ? verb(translateNow('assistant.tool.actions.runningCode'), translateNow('assistant.tool.actions.ranCode'))
+          : verb(translateNow('assistant.tool.actions.running'), translateNow('assistant.tool.actions.ran'))
 
-      return titledAction(action, ` · ${compactPreview(command, 160)}`)
+      return titledAction(
+        action,
+        translateNow('assistant.tool.titleTemplates.actionCommand', action, compactPreview(command, 160))
+      )
     }
   }
 
@@ -1485,10 +1500,12 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const status = toolStatus(part, resultRecord)
   const error = toolErrorText(part, resultRecord)
   const baseTitle = part.result === undefined ? meta.pending : meta.done
-  const titleParts = dynamicTitle(part, argsRecord, resultRecord, {
-    action: part.result === undefined ? meta.pendingAction : undefined,
-    title: baseTitle
-  })
+  const titleParts = dynamicTitle(
+    part,
+    argsRecord,
+    resultRecord,
+    titlePartsFromAction(baseTitle, part.result === undefined ? meta.pendingAction : undefined)
+  )
   const title = titleParts.title
   const titleEnriched = title !== baseTitle
   const baseSubtitle = error || toolSubtitle(part, argsRecord, resultRecord)
@@ -1544,6 +1561,8 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     subtitle,
     title,
     titleAction: titleParts.action,
+    titleActionPrefix: titleParts.actionPrefix,
+    titleActionSuffix: titleParts.actionSuffix,
     tone: meta.tone
   }
 }

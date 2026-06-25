@@ -206,15 +206,18 @@ function ToolTitle({
   isPending,
   status,
   title,
-  titleAction
+  titleAction,
+  titleActionPrefix,
+  titleActionSuffix
 }: {
   isPending: boolean
   status: ToolStatus
   title: string
   titleAction?: string
+  titleActionPrefix?: string
+  titleActionSuffix?: string
 }) {
-  const action = isPending && titleAction && title.startsWith(titleAction) ? titleAction : ''
-  const rest = action ? title.slice(action.length) : ''
+  const hasAction = Boolean(isPending && titleAction && titleActionPrefix !== undefined && titleActionSuffix !== undefined)
 
   return (
     <FadeText
@@ -225,10 +228,11 @@ function ToolTitle({
         status === 'warning' && 'text-amber-700 dark:text-amber-300'
       )}
     >
-      {action ? (
+      {hasAction ? (
         <>
-          <span className="shimmer">{action}</span>
-          {rest}
+          {titleActionPrefix}
+          <span className="shimmer">{titleAction}</span>
+          {titleActionSuffix}
         </>
       ) : (
         title
@@ -438,6 +442,8 @@ function ToolEntry({ part }: ToolEntryProps) {
               status={view.status}
               title={view.title}
               titleAction={view.titleAction}
+              titleActionPrefix={view.titleActionPrefix}
+              titleActionSuffix={view.titleActionSuffix}
             />
             {!isPending && view.countLabel && <span className={TOOL_HEADER_DURATION_CLASS}>{view.countLabel}</span>}
             {showDiffStats && diffStats && (

@@ -1533,6 +1533,38 @@ export interface Translations {
       statusError: string
       statusRecovered: string
       statusDone: string
+      actions: {
+        read: string
+        reading: string
+        opened: string
+        opening: string
+        searched: string
+        searching: string
+        ran: string
+        running: string
+        ranCode: string
+        runningCode: string
+      }
+      prefixes: {
+        browser: string
+        web: string
+      }
+      titleTemplates: {
+        actionCommand: (action: string, command: string) => string
+        actionQuoted: (action: string, value: string) => string
+        actionTarget: (action: string, target: string) => string
+        prefixedDone: (prefix: string, action: string) => string
+        runningPrefixedTool: (prefix: string, action: string) => string
+        runningTool: (action: string) => string
+      }
+      titles: Record<
+        string,
+        {
+          done: string
+          pending: string
+          pendingAction: string
+        }
+      >
     }
   }
 

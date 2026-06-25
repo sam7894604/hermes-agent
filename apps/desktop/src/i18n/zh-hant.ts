@@ -1968,7 +1968,55 @@ export const zhHant = defineLocale({
       statusRunning: '執行中',
       statusError: '錯誤',
       statusRecovered: '已復原',
-      statusDone: '完成'
+      statusDone: '完成',
+      actions: {
+        read: '已讀取',
+        reading: '正在讀取',
+        opened: '已開啟',
+        opening: '正在開啟',
+        searched: '已搜尋',
+        searching: '正在搜尋',
+        ran: '已執行',
+        running: '正在執行',
+        ranCode: '已執行程式碼',
+        runningCode: '正在執行程式碼'
+      },
+      prefixes: {
+        browser: '瀏覽器',
+        web: '網頁'
+      },
+      titleTemplates: {
+        actionCommand: (action, command) => `${action} · ${command}`,
+        actionQuoted: (action, value) => `${action}「${value}」`,
+        actionTarget: (action, target) => `${action} ${target}`,
+        prefixedDone: (prefix, action) => `${prefix}${action}`,
+        runningPrefixedTool: (prefix, action) => `正在執行${prefix}${action}`,
+        runningTool: action => `正在執行 ${action}`
+      },
+      titles: {
+        browser_click: { done: '已點擊頁面元素', pending: '正在點擊頁面元素', pendingAction: '正在點擊' },
+        browser_fill: { done: '已填寫表單欄位', pending: '正在填寫表單欄位', pendingAction: '正在填寫' },
+        browser_navigate: { done: '已開啟頁面', pending: '正在開啟頁面', pendingAction: '正在開啟' },
+        browser_snapshot: { done: '已擷取頁面快照', pending: '正在擷取頁面快照', pendingAction: '正在擷取' },
+        browser_take_screenshot: { done: '已擷取截圖', pending: '正在擷取截圖', pendingAction: '正在擷取' },
+        browser_type: { done: '已在頁面輸入', pending: '正在頁面輸入', pendingAction: '正在輸入' },
+        clarify: { done: '已提問', pending: '正在提問', pendingAction: '正在提問' },
+        cronjob: { done: 'Cron 工作', pending: '正在安排 Cron 工作', pendingAction: '正在安排' },
+        edit_file: { done: '已編輯檔案', pending: '正在編輯檔案', pendingAction: '正在編輯' },
+        execute_code: { done: '已執行程式碼', pending: '正在執行程式碼', pendingAction: '正在執行程式碼' },
+        image_generate: { done: '已生成圖片', pending: '正在生成圖片', pendingAction: '正在生成' },
+        list_files: { done: '已列出檔案', pending: '正在列出檔案', pendingAction: '正在列出' },
+        patch: { done: '已修補檔案', pending: '正在修補檔案', pendingAction: '正在修補' },
+        read_file: { done: '已讀取檔案', pending: '正在讀取檔案', pendingAction: '正在讀取' },
+        search_files: { done: '已搜尋檔案', pending: '正在搜尋檔案', pendingAction: '正在搜尋' },
+        session_search_recall: { done: '已搜尋工作階段歷史', pending: '正在搜尋工作階段歷史', pendingAction: '正在搜尋' },
+        terminal: { done: '已執行指令', pending: '正在執行指令', pendingAction: '正在執行' },
+        todo: { done: '已更新待辦', pending: '正在更新待辦', pendingAction: '正在更新' },
+        vision_analyze: { done: '已分析圖片', pending: '正在分析圖片', pendingAction: '正在分析' },
+        web_extract: { done: '已讀取網頁', pending: '正在讀取網頁', pendingAction: '正在讀取' },
+        web_search: { done: '已搜尋網頁', pending: '正在搜尋網頁', pendingAction: '正在搜尋' },
+        write_file: { done: '已編輯檔案', pending: '正在編輯檔案', pendingAction: '正在編輯' }
+      }
     }
   },
 

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { setRuntimeI18nLocale } from '@/i18n'
 
 import {
   buildToolView,
@@ -15,6 +17,10 @@ const part = (overrides: Partial<ToolPart>): ToolPart => ({
   toolName: 'vision_analyze',
   type: 'tool-call',
   ...overrides
+})
+
+afterEach(() => {
+  setRuntimeI18nLocale('en')
 })
 
 describe('buildToolView image handling', () => {
@@ -135,6 +141,25 @@ describe('buildToolView title actions', () => {
 
     expect(view.title).toBe('Read example.com')
     expect(view.titleAction).toBeUndefined()
+  })
+
+  it('uses the runtime locale for title text and action placement', () => {
+    setRuntimeI18nLocale('ja')
+
+    const read = buildToolView(part({ args: { path: '/tmp/demo.txt' }, result: undefined, toolName: 'read_file' }), '')
+    const web = buildToolView(
+      part({ args: { url: 'https://example.com/docs' }, result: undefined, toolName: 'web_extract' }),
+      ''
+    )
+
+    expect(read.title).toBe('ファイルを読み取り中')
+    expect(read.titleAction).toBe('読み取り中')
+    expect(read.titleActionPrefix).toBe('ファイルを')
+    expect(read.titleActionSuffix).toBe('')
+    expect(web.title).toBe('example.com を読み取り中')
+    expect(web.titleAction).toBe('読み取り中')
+    expect(web.titleActionPrefix).toBe('example.com を')
+    expect(web.titleActionSuffix).toBe('')
   })
 })
 
