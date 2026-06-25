@@ -7,6 +7,36 @@
 
 export type Locale = 'en' | 'zh' | 'zh-hant' | 'ja'
 
+export type ToolTitleKey =
+  | 'browser_click'
+  | 'browser_fill'
+  | 'browser_navigate'
+  | 'browser_snapshot'
+  | 'browser_take_screenshot'
+  | 'browser_type'
+  | 'clarify'
+  | 'cronjob'
+  | 'edit_file'
+  | 'execute_code'
+  | 'image_generate'
+  | 'list_files'
+  | 'patch'
+  | 'read_file'
+  | 'search_files'
+  | 'session_search_recall'
+  | 'terminal'
+  | 'todo'
+  | 'vision_analyze'
+  | 'web_extract'
+  | 'web_search'
+  | 'write_file'
+
+interface ToolTitleCopy {
+  done: string
+  pending: string
+  pendingAction: string
+}
+
 interface ModeOptionCopy {
   label: string
   description: string
@@ -1557,14 +1587,7 @@ export interface Translations {
         runningPrefixedTool: (prefix: string, action: string) => string
         runningTool: (action: string) => string
       }
-      titles: Record<
-        string,
-        {
-          done: string
-          pending: string
-          pendingAction: string
-        }
-      >
+      titles: Record<ToolTitleKey, ToolTitleCopy>
     }
   }
 

@@ -280,7 +280,8 @@ export const zhHant = defineLocale({
       importedBadge: '已匯入',
       pet: {
         title: '寵物',
-        intro: '領養一隻懸浮在應用上的 petdex 動畫寵物，它會根據 Hermes 的狀態做出反應——工具執行時奔跑、成功時歡呼、出錯時沮喪。',
+        intro:
+          '領養一隻懸浮在應用上的 petdex 動畫寵物，它會根據 Hermes 的狀態做出反應——工具執行時奔跑、成功時歡呼、出錯時沮喪。',
         restartHint: '寵物功能需要重新啟動——目前執行的應用在此功能加入前啟動。請結束並重新開啟 Hermes，然後回到此處。',
         scaleTitle: '大小',
         scaleDesc: '調整懸浮寵物的大小，所有介面即時生效。',
@@ -1546,7 +1547,8 @@ export const zhHant = defineLocale({
     copy: '複製',
     copied: '已複製',
     done: '完成',
-    applyingBody: 'Hermes 更新程式會在自己的視窗中接管，並在完成後自動重新開啟 Hermes。更新期間請勿自行重新開啟 Hermes。',
+    applyingBody:
+      'Hermes 更新程式會在自己的視窗中接管，並在完成後自動重新開啟 Hermes。更新期間請勿自行重新開啟 Hermes。',
     applyingBodyBackend: '遠端後端正在套用更新並將重新啟動。恢復後 Hermes 會自動重新連線。',
     applyingClose: '此視窗會在更新期間關閉，隨後 Hermes 會自動重新開啟。',
     errorTitle: '更新未完成',
@@ -2009,7 +2011,11 @@ export const zhHant = defineLocale({
         patch: { done: '已修補檔案', pending: '正在修補檔案', pendingAction: '正在修補' },
         read_file: { done: '已讀取檔案', pending: '正在讀取檔案', pendingAction: '正在讀取' },
         search_files: { done: '已搜尋檔案', pending: '正在搜尋檔案', pendingAction: '正在搜尋' },
-        session_search_recall: { done: '已搜尋工作階段歷史', pending: '正在搜尋工作階段歷史', pendingAction: '正在搜尋' },
+        session_search_recall: {
+          done: '已搜尋工作階段歷史',
+          pending: '正在搜尋工作階段歷史',
+          pendingAction: '正在搜尋'
+        },
         terminal: { done: '已執行指令', pending: '正在執行指令', pendingAction: '正在執行' },
         todo: { done: '已更新待辦', pending: '正在更新待辦', pendingAction: '正在更新' },
         vision_analyze: { done: '已分析圖片', pending: '正在分析圖片', pendingAction: '正在分析' },

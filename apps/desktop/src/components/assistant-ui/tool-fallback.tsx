@@ -45,7 +45,8 @@ import {
   toolCopyPayload,
   type ToolPart,
   toolPartDisclosureId,
-  type ToolStatus
+  type ToolStatus,
+  type ToolTitleAction
 } from './tool-fallback-model'
 
 // `true` when a ToolEntry is rendered inside an embedding wrapper that owns
@@ -206,19 +207,13 @@ function ToolTitle({
   isPending,
   status,
   title,
-  titleAction,
-  titleActionPrefix,
-  titleActionSuffix
+  titleAction
 }: {
   isPending: boolean
   status: ToolStatus
   title: string
-  titleAction?: string
-  titleActionPrefix?: string
-  titleActionSuffix?: string
+  titleAction?: ToolTitleAction
 }) {
-  const hasAction = Boolean(isPending && titleAction && titleActionPrefix !== undefined && titleActionSuffix !== undefined)
-
   return (
     <FadeText
       className={cn(
@@ -228,11 +223,11 @@ function ToolTitle({
         status === 'warning' && 'text-amber-700 dark:text-amber-300'
       )}
     >
-      {hasAction ? (
+      {isPending && titleAction ? (
         <>
-          {titleActionPrefix}
-          <span className="shimmer">{titleAction}</span>
-          {titleActionSuffix}
+          {titleAction.prefix}
+          <span className="shimmer">{titleAction.text}</span>
+          {titleAction.suffix}
         </>
       ) : (
         title
@@ -437,14 +432,7 @@ function ToolEntry({ part }: ToolEntryProps) {
               icon={view.icon}
               status={leadingStatus(isPending, view.status)}
             />
-            <ToolTitle
-              isPending={isPending}
-              status={view.status}
-              title={view.title}
-              titleAction={view.titleAction}
-              titleActionPrefix={view.titleActionPrefix}
-              titleActionSuffix={view.titleActionSuffix}
-            />
+            <ToolTitle isPending={isPending} status={view.status} title={view.title} titleAction={view.titleAction} />
             {!isPending && view.countLabel && <span className={TOOL_HEADER_DURATION_CLASS}>{view.countLabel}</span>}
             {showDiffStats && diffStats && (
               <span className="flex shrink-0 items-center gap-1 font-mono text-[0.625rem] tabular-nums">

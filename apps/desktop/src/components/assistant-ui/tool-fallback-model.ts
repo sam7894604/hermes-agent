@@ -1,6 +1,6 @@
+import { type ToolTitleKey, translateNow } from '@/i18n'
 import { normalizeExternalUrl } from '@/lib/external-link'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
-import { translateNow } from '@/i18n'
 
 export type ToolTone = 'agent' | 'browser' | 'default' | 'file' | 'image' | 'terminal' | 'web'
 export type ToolStatus = 'error' | 'running' | 'success' | 'warning'
@@ -18,6 +18,12 @@ export interface SearchResultRow {
   snippet: string
   title: string
   url: string
+}
+
+export interface ToolTitleAction {
+  prefix: string
+  suffix: string
+  text: string
 }
 
 interface CountMetric {
@@ -51,9 +57,7 @@ export interface ToolView {
   status: ToolStatus
   subtitle: string
   title: string
-  titleAction?: string
-  titleActionPrefix?: string
-  titleActionSuffix?: string
+  titleAction?: ToolTitleAction
   tone: ToolTone
 }
 
@@ -121,7 +125,7 @@ function fileEditBasename(path: string): string {
   return normalized.split('/').filter(Boolean).pop() || normalized
 }
 
-const TOOL_META: Record<string, ToolMetaSpec> = {
+const TOOL_META: Record<ToolTitleKey, ToolMetaSpec> = {
   browser_click: {
     icon: 'globe',
     tone: 'browser'
@@ -191,6 +195,10 @@ const TOOL_META: Record<string, ToolMetaSpec> = {
   write_file: { icon: 'edit', tone: 'file' }
 }
 
+function isToolTitleKey(name: string): name is ToolTitleKey {
+  return name in TOOL_META
+}
+
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
 const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu
 const BACKTICK_NOISE_RE = /`{3,}/g
@@ -216,15 +224,15 @@ const PREFIX_META: { icon?: string; labelKey: string; prefix: string; tone: Tool
 ]
 
 function toolMeta(name: string): ToolMeta {
-  const known = TOOL_META[name]
+  if (isToolTitleKey(name)) {
+    const meta = TOOL_META[name]
 
-  if (known) {
     return {
       done: translateNow(`assistant.tool.titles.${name}.done`),
       pending: translateNow(`assistant.tool.titles.${name}.pending`),
       pendingAction: translateNow(`assistant.tool.titles.${name}.pendingAction`),
-      icon: known.icon,
-      tone: known.tone
+      icon: meta.icon,
+      tone: meta.tone
     }
   }
 
@@ -1006,8 +1014,13 @@ function fallbackDetailText(args: unknown, result: unknown): string {
 }
 
 function cronScalar(value: unknown): string {
-  if (typeof value === 'string') return value.trim()
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value)
+  }
 
   return ''
 }
@@ -1015,7 +1028,9 @@ function cronScalar(value: unknown): string {
 function formatCronTime(iso: string): string {
   const ts = Date.parse(iso)
 
-  if (Number.isNaN(ts)) return iso
+  if (Number.isNaN(ts)) {
+    return iso
+  }
 
   return new Date(ts).toLocaleString(undefined, {
     month: 'short',
@@ -1025,10 +1040,7 @@ function formatCronTime(iso: string): string {
   })
 }
 
-function cronjobSubtitle(
-  argsRecord: Record<string, unknown>,
-  resultRecord: Record<string, unknown>
-): string {
+function cronjobSubtitle(argsRecord: Record<string, unknown>, resultRecord: Record<string, unknown>): string {
   const jobs = Array.isArray(resultRecord.jobs) ? resultRecord.jobs : null
 
   if (jobs) {
@@ -1037,7 +1049,9 @@ function cronjobSubtitle(
 
   const message = firstStringField(resultRecord, ['message'])
 
-  if (message) return message
+  if (message) {
+    return message
+  }
 
   const action = firstStringField(argsRecord, ['action']) || 'manage'
   const name = firstStringField(resultRecord, ['name']) || firstStringField(argsRecord, ['name', 'job_id'])
@@ -1046,14 +1060,13 @@ function cronjobSubtitle(
   return name ? `${label} ${name}` : `Cron ${action}`
 }
 
-function cronjobDetail(
-  argsRecord: Record<string, unknown>,
-  resultRecord: Record<string, unknown>
-): string {
+function cronjobDetail(argsRecord: Record<string, unknown>, resultRecord: Record<string, unknown>): string {
   const jobs = Array.isArray(resultRecord.jobs) ? resultRecord.jobs : null
 
   if (jobs) {
-    if (!jobs.length) return 'No cron jobs scheduled'
+    if (!jobs.length) {
+      return 'No cron jobs scheduled'
+    }
 
     return jobs
       .slice(0, 20)
@@ -1068,12 +1081,14 @@ function cronjobDetail(
   }
 
   const nextRun = cronScalar(resultRecord.next_run_at)
+
   const rows: [string, string][] = [
     ['Schedule', cronScalar(resultRecord.schedule)],
     ['Repeat', cronScalar(resultRecord.repeat)],
     ['Delivery', cronScalar(resultRecord.deliver)],
     ['Next run', nextRun ? formatCronTime(nextRun) : '']
   ]
+
   const lines = rows.filter(([, value]) => value).map(([key, value]) => `${key}: ${value}`)
 
   return lines.length ? lines.join('\n') : fallbackDetailText(argsRecord, resultRecord)
@@ -1316,6 +1331,7 @@ export function toolCopyPayload(part: ToolPart, view: ToolView): { label: string
     url: translateNow('assistant.tool.copyUrl'),
     generic: translateNow('common.copy')
   }
+
   const args = parseMaybeObject(part.args)
   const result = parseMaybeObject(part.result)
   const detail = view.detail.trim()
@@ -1399,9 +1415,7 @@ export function toolCopyPayload(part: ToolPart, view: ToolView): { label: string
 }
 
 interface ToolTitleParts {
-  action?: string
-  actionPrefix?: string
-  actionSuffix?: string
+  action?: ToolTitleAction
   title: string
 }
 
@@ -1413,13 +1427,15 @@ function titlePartsFromAction(title: string, action?: string): ToolTitleParts {
   const actionStart = title.indexOf(action)
 
   if (actionStart < 0) {
-    return { action, title }
+    return { title }
   }
 
   return {
-    action,
-    actionPrefix: title.slice(0, actionStart),
-    actionSuffix: title.slice(actionStart + action.length),
+    action: {
+      prefix: title.slice(0, actionStart),
+      suffix: title.slice(actionStart + action.length),
+      text: action
+    },
     title
   }
 }
@@ -1431,38 +1447,41 @@ function dynamicTitle(
   fallback: ToolTitleParts
 ): ToolTitleParts {
   const verb = (gerund: string, past: string) => (part.result === undefined ? gerund : past)
+
   const titledAction = (action: string, title: string): ToolTitleParts =>
     titlePartsFromAction(title, part.result === undefined ? action : undefined)
 
   if (part.toolName === 'web_extract') {
     const url = findFirstUrl(args, result)
-    const action = verb(
-      translateNow('assistant.tool.actions.reading'),
-      translateNow('assistant.tool.actions.read')
-    )
+    const action = verb(translateNow('assistant.tool.actions.reading'), translateNow('assistant.tool.actions.read'))
 
-    return url ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url))) : fallback
+    return url
+      ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url)))
+      : fallback
   }
 
   if (part.toolName === 'browser_navigate') {
     const url = findFirstUrl(args, result)
-    const action = verb(
-      translateNow('assistant.tool.actions.opening'),
-      translateNow('assistant.tool.actions.opened')
-    )
+    const action = verb(translateNow('assistant.tool.actions.opening'), translateNow('assistant.tool.actions.opened'))
 
-    return url ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url))) : fallback
+    return url
+      ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionTarget', action, hostnameOf(url)))
+      : fallback
   }
 
   if (part.toolName === 'web_search') {
     const query = firstStringField(args, ['search_term', 'query']) || contextValue(args)
+
     const action = verb(
       translateNow('assistant.tool.actions.searching'),
       translateNow('assistant.tool.actions.searched')
     )
 
     return query
-      ? titledAction(action, translateNow('assistant.tool.titleTemplates.actionQuoted', action, compactPreview(query, 48)))
+      ? titledAction(
+          action,
+          translateNow('assistant.tool.titleTemplates.actionQuoted', action, compactPreview(query, 48))
+        )
       : fallback
   }
 
@@ -1500,12 +1519,14 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const status = toolStatus(part, resultRecord)
   const error = toolErrorText(part, resultRecord)
   const baseTitle = part.result === undefined ? meta.pending : meta.done
+
   const titleParts = dynamicTitle(
     part,
     argsRecord,
     resultRecord,
     titlePartsFromAction(baseTitle, part.result === undefined ? meta.pendingAction : undefined)
   )
+
   const title = titleParts.title
   const titleEnriched = title !== baseTitle
   const baseSubtitle = error || toolSubtitle(part, argsRecord, resultRecord)
@@ -1561,8 +1582,6 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
     subtitle,
     title,
     titleAction: titleParts.action,
-    titleActionPrefix: titleParts.actionPrefix,
-    titleActionSuffix: titleParts.actionSuffix,
     tone: meta.tone
   }
 }

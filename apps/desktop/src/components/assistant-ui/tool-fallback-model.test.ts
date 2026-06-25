@@ -2,12 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { setRuntimeI18nLocale } from '@/i18n'
 
-import {
-  buildToolView,
-  countDiffLineStats,
-  inlineDiffFromResult,
-  type ToolPart
-} from './tool-fallback-model'
+import { buildToolView, countDiffLineStats, inlineDiffFromResult, type ToolPart } from './tool-fallback-model'
 
 const part = (overrides: Partial<ToolPart>): ToolPart => ({
   args: {},
@@ -46,8 +41,7 @@ describe('buildToolView image handling', () => {
 })
 
 describe('buildToolView terminal exit-code status', () => {
-  const terminal = (result: Record<string, unknown>) =>
-    buildToolView(part({ result, toolName: 'terminal' }), '')
+  const terminal = (result: Record<string, unknown>) => buildToolView(part({ result, toolName: 'terminal' }), '')
 
   // A non-zero exit code with real output is not a failure (grep no-match,
   // diff differences, piped commands surfacing the last stage's code, etc.) —
@@ -119,27 +113,29 @@ describe('buildToolView file edit diffs', () => {
 describe('buildToolView title actions', () => {
   it('marks the pending action separately from the rest of the title', () => {
     const read = buildToolView(part({ args: { path: '/tmp/demo.txt' }, result: undefined, toolName: 'read_file' }), '')
+
     const web = buildToolView(
       part({ args: { url: 'https://example.com/docs' }, result: undefined, toolName: 'web_extract' }),
       ''
     )
+
     const terminal = buildToolView(
       part({ args: { command: 'npm test -- --runInBand' }, result: undefined, toolName: 'terminal' }),
       ''
     )
 
     expect(read.title).toBe('Reading file')
-    expect(read.titleAction).toBe('Reading')
-    expect(web.title).toBe('Reading example.com')
-    expect(web.titleAction).toBe('Reading')
+    expect(read.titleAction).toEqual({ prefix: '', text: 'Reading', suffix: ' file' })
+    expect(web.title).toBe('Reading example.com/docs')
+    expect(web.titleAction).toEqual({ prefix: '', text: 'Reading', suffix: ' example.com/docs' })
     expect(terminal.title).toBe('Running · npm test -- --runInBand')
-    expect(terminal.titleAction).toBe('Running')
+    expect(terminal.titleAction).toEqual({ prefix: '', text: 'Running', suffix: ' · npm test -- --runInBand' })
   })
 
   it('does not mark completed tool titles as pending actions', () => {
     const view = buildToolView(part({ args: { url: 'https://example.com/docs' }, toolName: 'web_extract' }), '')
 
-    expect(view.title).toBe('Read example.com')
+    expect(view.title).toBe('Read example.com/docs')
     expect(view.titleAction).toBeUndefined()
   })
 
@@ -147,26 +143,21 @@ describe('buildToolView title actions', () => {
     setRuntimeI18nLocale('ja')
 
     const read = buildToolView(part({ args: { path: '/tmp/demo.txt' }, result: undefined, toolName: 'read_file' }), '')
+
     const web = buildToolView(
       part({ args: { url: 'https://example.com/docs' }, result: undefined, toolName: 'web_extract' }),
       ''
     )
 
     expect(read.title).toBe('ファイルを読み取り中')
-    expect(read.titleAction).toBe('読み取り中')
-    expect(read.titleActionPrefix).toBe('ファイルを')
-    expect(read.titleActionSuffix).toBe('')
-    expect(web.title).toBe('example.com を読み取り中')
-    expect(web.titleAction).toBe('読み取り中')
-    expect(web.titleActionPrefix).toBe('example.com を')
-    expect(web.titleActionSuffix).toBe('')
+    expect(read.titleAction).toEqual({ prefix: 'ファイルを', text: '読み取り中', suffix: '' })
+    expect(web.title).toBe('example.com/docs を読み取り中')
+    expect(web.titleAction).toEqual({ prefix: 'example.com/docs を', text: '読み取り中', suffix: '' })
   })
 })
 
 describe('countDiffLineStats', () => {
   it('counts added and removed lines', () => {
-    expect(
-      countDiffLineStats(`--- a/x\n+++ b/x\n@@\n-old\n+new\n context\n+another`)
-    ).toEqual({ added: 2, removed: 1 })
+    expect(countDiffLineStats(`--- a/x\n+++ b/x\n@@\n-old\n+new\n context\n+another`)).toEqual({ added: 2, removed: 1 })
   })
 })
