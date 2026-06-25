@@ -152,6 +152,7 @@ export interface Msg {
   // tell "the reasoning happening right now" apart from finished blocks.
   isLiveReasoning?: boolean
   thinkingTokens?: number
+  tokenBreakdown?: { input: number; output: number; reasoning: number }
   toolTokens?: number
   tools?: string[]
   todos?: TodoItem[]

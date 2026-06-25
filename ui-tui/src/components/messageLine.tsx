@@ -59,6 +59,7 @@ export const MessageLine = memo(function MessageLine({
   prev,
   reasoningActive = false,
   sections,
+  showTokens = false,
   t,
   timestamps = false,
   tools = []
@@ -319,6 +320,15 @@ export const MessageLine = memo(function MessageLine({
 
         <Box width={transcriptBodyWidth(cols, msg.role, t.brand.prompt, TERMUX_TUI_MODE)}>{content}</Box>
       </Box>
+
+      {showTokens && msg.role === 'assistant' && msg.tokenBreakdown && (
+        <Box>
+          <NoSelect flexShrink={0} fromLeftEdge width={gutterWidth} />
+          <Text color={t.color.muted} dimColor>
+            {`📊 in:${msg.tokenBreakdown.input} out:${msg.tokenBreakdown.output} reason:${msg.tokenBreakdown.reasoning}`}
+          </Text>
+        </Box>
+      )}
     </Box>
   )
 })
@@ -352,6 +362,9 @@ interface MessageLineProps {
   prev?: Msg
   reasoningActive?: boolean
   sections?: SectionVisibility
+  // When true, assistant messages carrying a per-turn tokenBreakdown render a
+  // compact "📊 in/out/reason" footer (gated by the /tokens toggle).
+  showTokens?: boolean
   t: Theme
   /** `display.timestamps` — dim [HH:MM] label on user/assistant rows. */
   timestamps?: boolean

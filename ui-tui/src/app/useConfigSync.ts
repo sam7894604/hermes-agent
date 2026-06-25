@@ -306,6 +306,7 @@ export const applyDisplay = (
     pasteCollapseChars: _pasteCollapseCharsFromConfig(cfg),
     sections: resolveSections(d.sections),
     showReasoning: !!d.show_reasoning,
+    showTokens: !!d.show_message_tokens,
     statusBar: normalizeStatusBar(d.tui_statusbar),
     statusBarFields: normalizeStatusBarFields(d.status_bar?.fields),
     streaming: d.streaming !== false,
