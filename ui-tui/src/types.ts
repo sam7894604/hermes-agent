@@ -121,6 +121,7 @@ export interface Msg {
   text: string
   thinking?: string
   thinkingTokens?: number
+  tokenBreakdown?: { input: number; output: number; reasoning: number }
   toolTokens?: number
   tools?: string[]
   todos?: TodoItem[]
