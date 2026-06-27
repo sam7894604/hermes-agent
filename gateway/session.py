@@ -643,6 +643,7 @@ def build_session_context_prompt(
             "Voice-channel state, when relevant, appears in the current "
             "message as a `[Voice channel now: ...]` note."
         )
+        # Auto-choice: prefix "? " for single-select, "?? " for multi-select (Discord & Telegram)
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
