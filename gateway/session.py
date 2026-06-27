@@ -501,6 +501,7 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+        # Auto-choice: prefix "? " for single-select, "?? " for multi-select (Discord & Telegram)
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
