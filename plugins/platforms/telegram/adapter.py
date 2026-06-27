@@ -592,6 +592,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # Clarify button state: clarify_id → session_key (for the clarify tool's
         # multiple-choice prompts; see GatewayRunner clarify_callback wiring).
         self._clarify_state: Dict[str, str] = {}
+        # Auto-choice button state: ac_id → (choices, multi_select, chat_id, thread_id)
+        # Populated by _maybe_send_choice_buttons_tg(); consumed by _handle_callback_query.
+        self._auto_choice_state: Dict[str, tuple] = {}
         # Notification mode for message sends.
         # "important" — only final responses, approvals, and slash confirmations
         #               trigger notifications; tool progress, streaming, status
@@ -2880,6 +2883,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 except Exception:
                     pass  # Typing failures are non-fatal
 
+            # Auto-detect choice prompts and append clickable buttons.
+            # Best-effort: failures are swallowed so they never block delivery.
+            if message_ids:
+                await self._maybe_send_choice_buttons_tg(
+                    chat_id=chat_id,
+                    content=content,
+                    message_id=message_ids[0],
+                    metadata=metadata,
+                )
+
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
@@ -3758,6 +3771,185 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    # ── Auto-detected choice buttons (Telegram) ───────────────────────────
+
+    def _telegram_auto_choice_buttons(self) -> bool:
+        """Feature flag: enable auto-choice buttons on Telegram.
+
+        Defaults to ``True``; opt out via::
+
+            platforms:
+              telegram:
+                extra:
+                  auto_choice_buttons: false
+        """
+        return bool(self._coerce_bool_extra("auto_choice_buttons", True))
+
+    async def _maybe_send_choice_buttons_tg(
+        self,
+        chat_id: str,
+        content: str,
+        message_id: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Append clickable choice buttons when ``content`` poses a choice.
+
+        Parses the just-sent message for an explicit choice prefix — ``? ``
+        for single-select or ``?? `` for multi-select — plus an option list
+        (numbered, circled, lettered, or bulleted).  If 2+ options are found,
+        sends a follow-up message with ``InlineKeyboardMarkup``, one button
+        per choice.  Clicking a button injects the chosen text as a fresh
+        user message via ``handle_message``.
+
+        Multi-select: Telegram has no native toggle UI, so only single-select
+        is implemented here.  Multi-select is accepted (``?? `` prefix) but
+        treated identically to single-select — the first click resolves.
+        ponytail: multi-select accumulation (toggle + confirm button) would
+        require per-session pending-selection state + edit_message_reply_markup
+        round-trips; skip for now, treat ?? same as ?.
+
+        Best-effort: any failure is swallowed (logged at debug) so a parsing
+        or network hiccup never breaks the primary message delivery.
+
+        Callback data format: ``ac:<ac_id>:<idx>``
+        ``ac_id`` is a short monotonic counter; ``idx`` is the 0-based choice
+        index.  Total length stays well under Telegram's 64-byte cap.
+        """
+        if not self._telegram_auto_choice_buttons():
+            return
+        if not self._bot:
+            return
+        try:
+            from gateway.platforms.auto_choice_utils import (
+                _detect_inline_choices,
+                _extract_choice_question,
+            )
+
+            choices, _multi_select = _detect_inline_choices(content)
+            if len(choices) < 2:
+                return
+
+            # Generate a short monotonic ID for this prompt.
+            import itertools
+            if not hasattr(self, "_auto_choice_counter"):
+                self._auto_choice_counter = itertools.count(1)
+            ac_id = str(next(self._auto_choice_counter))
+
+            # Build one button row per choice (narrow label, number prefix).
+            # Keep labels short: Telegram truncates display at ~36 chars on
+            # mobile but enforces no server-side label-length limit.
+            rows = []
+            for idx, choice in enumerate(choices):
+                label = f"{idx + 1}. {choice}"
+                if len(label) > 60:
+                    label = label[:59] + "…"
+                # callback_data budget: "ac:" (3) + ac_id (≤6) + ":" (1)
+                # + idx (≤2) = ≤12 bytes — well within Telegram's 64-byte cap.
+                rows.append([
+                    InlineKeyboardButton(
+                        label,
+                        callback_data=f"ac:{ac_id}:{idx}",
+                    )
+                ])
+            rows.append([
+                InlineKeyboardButton(
+                    "✏️ Other (type answer)",
+                    callback_data=f"ac:{ac_id}:other",
+                )
+            ])
+
+            question = _extract_choice_question(content)
+            hint = "Tap a choice, or ✏️ Other to type your own."
+            text_parts = []
+            if question:
+                text_parts.append(f"❓ {_html.escape(question)}")
+            text_parts.append(f"<i>{_html.escape(hint)}</i>")
+            follow_up_text = "\n".join(text_parts)
+
+            thread_id = self._metadata_thread_id(metadata)
+            send_kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": follow_up_text,
+                "parse_mode": ParseMode.HTML,
+                "reply_markup": InlineKeyboardMarkup(rows),
+                **self._link_preview_kwargs(),
+            }
+            send_kwargs.update(
+                self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                )
+            )
+
+            msg = await self._send_message_with_thread_fallback(**send_kwargs)
+            self._auto_choice_state[ac_id] = (
+                choices,
+                _multi_select,
+                chat_id,
+                thread_id,
+                str(msg.message_id),
+            )
+        except Exception as exc:
+            logger.debug("[%s] auto-choice buttons skipped: %s", self.name, exc)
+
+    async def _inject_user_choice_tg(self, query: Any, choice_text: str) -> None:
+        """Feed a clicked auto-choice button back into the gateway as a fresh user turn.
+
+        Builds a :class:`MessageEvent` from the callback query's chat + clicking
+        user — matching the session key a real message in that chat/thread would
+        produce — and dispatches via ``handle_message``.  ``raw_message`` is
+        ``None`` (synthetic event), matching the shape other injected events use.
+        """
+        query_message = getattr(query, "message", None)
+        if not query_message:
+            return
+        chat = getattr(query_message, "chat", None)
+        if not chat:
+            return
+        user = getattr(query, "from_user", None)
+
+        raw_chat_type = str(getattr(getattr(chat, "type", None), "value",
+                                    getattr(chat, "type", "private")) or "private").lower()
+        if raw_chat_type == "private":
+            chat_type = "dm"
+        elif raw_chat_type in {"supergroup", "group"}:
+            thread_id_val = getattr(query_message, "message_thread_id", None)
+            chat_type = "forum" if thread_id_val is not None else "group"
+        else:
+            chat_type = "group"
+
+        thread_id_str = (
+            str(getattr(query_message, "message_thread_id", None))
+            if getattr(query_message, "message_thread_id", None) is not None
+            else None
+        )
+
+        source = self.build_source(
+            chat_id=str(chat.id),
+            chat_name=(
+                getattr(chat, "title", None)
+                or getattr(chat, "full_name", None)
+                or str(chat.id)
+            ),
+            chat_type=chat_type,
+            user_id=str(getattr(user, "id", "")) if user else str(chat.id),
+            user_name=(
+                getattr(user, "full_name", None)
+                or getattr(user, "first_name", None)
+                or "user"
+            ) if user else None,
+            thread_id=thread_id_str,
+        )
+
+        event = MessageEvent(
+            text=choice_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=None,
+        )
+        await self.handle_message(event)
+
     async def send_model_picker(
         self,
         chat_id: str,
@@ -4530,6 +4722,78 @@ class TelegramAdapter(BasePlatformAdapter):
                         "Telegram clarify button: resolve_gateway_clarify returned False (id=%s)",
                         clarify_id,
                     )
+            return
+
+        # --- Auto-choice callbacks (ac:<ac_id>:<idx> | ac:<ac_id>:other) ---
+        if data.startswith("ac:"):
+            parts = data.split(":", 2)
+            if len(parts) == 3:
+                ac_id = parts[1]
+                choice_token = parts[2]
+
+                caller_id = str(getattr(query.from_user, "id", ""))
+                if not self._is_callback_user_authorized(
+                    caller_id,
+                    chat_id=query_chat_id,
+                    chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                    thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                    user_name=query_user_name,
+                ):
+                    await query.answer(text="⛔ You are not authorized to answer this prompt.")
+                    return
+
+                state = self._auto_choice_state.get(ac_id)
+                if not state:
+                    await query.answer(text="This prompt has already been resolved.")
+                    return
+
+                choices, _multi_select, state_chat_id, state_thread_id, _btn_msg_id = state
+                user_display = getattr(query.from_user, "first_name", "User")
+
+                if choice_token == "other":
+                    # Dismiss buttons — user will type a free-form reply.
+                    self._auto_choice_state.pop(ac_id, None)
+                    await query.answer(text="✏️ Type your answer in the chat.")
+                    try:
+                        await query.edit_message_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
+                    return
+
+                # Numeric choice → inject as a fresh user turn.
+                try:
+                    idx = int(choice_token)
+                except (ValueError, TypeError):
+                    await query.answer(text="Invalid choice.")
+                    return
+
+                if idx < 0 or idx >= len(choices):
+                    await query.answer(text="Invalid choice index.")
+                    return
+
+                chosen_text = choices[idx]
+                # Single-use: pop state so double-clicks are ignored.
+                self._auto_choice_state.pop(ac_id, None)
+
+                await query.answer(text=f"✓ {chosen_text[:60]}")
+                try:
+                    await query.edit_message_text(
+                        text=f"<b>{_html.escape(user_display)}:</b> {_html.escape(chosen_text)}",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    await self._inject_user_choice_tg(query, chosen_text)
+                except Exception as exc:
+                    logger.error("[%s] _inject_user_choice_tg failed: %s", self.name, exc)
+
+                logger.info(
+                    "[%s] Auto-choice injected as user turn (chat=%s, user=%s, choice=%r)",
+                    self.name, query_chat_id, user_display, chosen_text,
+                )
             return
 
         # --- Update prompt callbacks ---
