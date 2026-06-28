@@ -1919,7 +1919,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 if hasattr(chunk, "model") and chunk.model:
                     model_name = chunk.model
                 # Usage comes in the final chunk with empty choices
-                if hasattr(chunk, "usage") and chunk.usage:
+                if hasattr(chunk, "usage") and chunk.usage is not None:
                     usage_obj = chunk.usage
                 continue
 
@@ -2029,7 +2029,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 finish_reason = chunk.choices[0].finish_reason
 
             # Usage in the final chunk
-            if hasattr(chunk, "usage") and chunk.usage:
+            if hasattr(chunk, "usage") and chunk.usage is not None:
                 usage_obj = chunk.usage
 
         # Build mock response matching non-streaming shape

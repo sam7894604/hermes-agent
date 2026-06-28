@@ -1806,8 +1806,14 @@ def run_conversation(
                             "error": "First response truncated due to output length limit"
                         }
                 
-                # Track actual token usage from response for context management
-                if hasattr(response, 'usage') and response.usage:
+                # Track actual token usage from response for context management.
+                # Guard on presence (``is not None``), not truthiness: a usage
+                # object whose fields are all zero is falsy, and a truthy test
+                # would skip the entire accounting block (context compaction,
+                # cost, /insights writes), leaving analytics empty.  This holds
+                # for any provider that returns such an object; normalize_usage()
+                # safely treats a falsy/empty usage object as zeros.
+                if getattr(response, 'usage', None) is not None:
                     canonical_usage = normalize_usage(
                         response.usage,
                         provider=agent.provider,

@@ -97,6 +97,45 @@ class TestStreamingAccumulator:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_present_but_falsy_usage_is_captured(self, mock_close, mock_create):
+        """A present-but-falsy usage object (e.g. Fireworks' empty final-chunk
+        usage) must still be captured onto the response.
+
+        The capture guard uses ``is not None`` rather than a truthy test, so an
+        empty/all-zero usage object reaches downstream token accounting instead
+        of being silently dropped (which left analytics token rates empty)."""
+        from run_agent import AIAgent
+
+        # An empty dict is present (not None) but falsy — the minimal stand-in
+        # for a provider that emits a usage field with no token data.
+        chunks = [
+            _make_stream_chunk(content="hi", finish_reason="stop", model="test-model"),
+            _make_empty_chunk(usage={}),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.fireworks.ai/inference/v1",
+            model="accounts/fireworks/models/test",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        # Captured, not dropped to None — downstream accounting runs.
+        assert response.usage is not None
+        assert response.usage == {}
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_tool_call_response(self, mock_close, mock_create):
         """Tool call stream accumulates ID, name, and arguments."""
         from run_agent import AIAgent
