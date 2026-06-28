@@ -256,7 +256,7 @@ When scheduling jobs, you specify where the output goes:
 | `"telegram,discord"` | Fan out to a specific set of channels | Comma-separated list |
 | `"origin,all"` | Deliver to the origin **plus** every other connected channel | Combine any tokens |
 
-The agent's final response is automatically delivered. You do not need to call `send_message` in the cron prompt.
+The agent's final response is automatically delivered to the configured `deliver:` target — the agent does not send messages itself, so there is nothing to call in the cron prompt.
 
 ### Routing intent (`all`)
 
@@ -297,6 +297,39 @@ To deliver the raw agent output without the wrapper, set `cron.wrap_response` to
 cron:
   wrap_response: false
 ```
+
+### Continuable jobs (reply to a cron delivery)
+
+By default a cron delivery is fire-and-forget: the message is sent, but it does
+not live in the chat's conversation history, so if you reply to it the agent
+has no record of what it said. Set a job **continuable** and the delivered brief
+becomes a conversation you can reply into — the agent has the brief in context
+instead of asking "what is Task #2?".
+
+Opt-in, **default off**. Enable globally in config, or per-job via the `cronjob`
+tool's `attach_to_session` (which overrides the global setting for that one job):
+
+```yaml
+# ~/.hermes/config.yaml
+cron:
+  mirror_delivery: false   # set true to make cron deliveries continuable
+```
+
+Behaviour is **thread-preferred**, scoped to the job's origin chat:
+
+- **Thread-capable platforms** (Telegram topics, Discord/Slack threads): each
+  delivery opens its own dedicated thread and the brief is seeded into that
+  thread's session, so a reply in-thread continues with full context. A
+  recurring job (e.g. a daily brief) opens a fresh thread per run, keeping each
+  delivery's follow-up discussion isolated.
+- **DM-only platforms** (WhatsApp, Signal, SMS): no threads exist, so the brief
+  is mirrored into the origin DM session instead — the DM itself is the
+  continuation surface.
+
+Only the origin chat is ever touched: fan-out / broadcast targets (`all`,
+explicit other-chat deliveries) are never made continuable. The mirror is
+written as a labelled user turn (`[Cron delivery: <task name>]`), which keeps
+the conversation history alternation-safe across all model providers.
 
 ### Silent suppression
 
@@ -431,7 +464,7 @@ This means cron jobs that run at high frequency or during peak hours are more re
 
 ## Schedule formats
 
-The agent's final response is automatically delivered — you do **not** need to include `send_message` in the cron prompt for that same destination. If a cron run calls `send_message` to the exact target the scheduler will already deliver to, Hermes skips that duplicate send and tells the model to put the user-facing content in the final response instead. Use `send_message` only for additional or different targets.
+The agent's final response is automatically delivered to the job's `deliver:` target — the agent no longer fires messages itself, so the user-facing content simply goes in the final response. To deliver to **additional or different** targets, list multiple `deliver:` targets on the cron job (comma-separated, e.g. `deliver: "telegram,discord"`) rather than having the agent send them.
 
 ### Relative delays (one-shot)
 
@@ -519,7 +552,7 @@ cronjob(action="create", name="weekly-news-summary",
         prompt="Summarize this week's AI news: ...")
 ```
 
-When `enabled_toolsets` is set on a job it wins; otherwise the `hermes tools` cron-platform config wins; otherwise Hermes falls back to the built-in defaults. This matters for cost control: carrying `moa`, `browser`, `delegation` into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.
+When `enabled_toolsets` is set on a job it wins; otherwise the `hermes tools` cron-platform config wins; otherwise Hermes falls back to the built-in defaults. This matters for cost control: carrying `browser`, `delegation` into every tiny "fetch news" job bloats the tool-schema prompt on every LLM call.
 
 ### Skipping the agent entirely: `wakeAgent`
 
