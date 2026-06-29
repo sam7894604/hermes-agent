@@ -3626,8 +3626,25 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_model(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/model {name}".strip())
 
-        @tree.command(name="reasoning", description="Show or change reasoning effort")
-        @discord.app_commands.describe(effort="Reasoning effort: none, minimal, low, medium, high, or xhigh.")
+        @tree.command(name="reasoning", description="Show/change reasoning effort, or toggle showing it")
+        @discord.app_commands.describe(effort="Pick a level, reset the override, or show/hide reasoning. Leave empty to see current.")
+        @discord.app_commands.choices(effort=[
+            # Effort levels and the reset/show/hide subcommands all arrive on the
+            # gateway's single `/reasoning <arg>` handler. Discord's native UI has
+            # no subcommand affordance for a free-text field (it just funnels the
+            # user into the `effort` box), so expose every accepted value as an
+            # explicit choice. --global persistence stays reachable by typing the
+            # command as plain text.
+            discord.app_commands.Choice(name="none — disable reasoning", value="none"),
+            discord.app_commands.Choice(name="minimal", value="minimal"),
+            discord.app_commands.Choice(name="low", value="low"),
+            discord.app_commands.Choice(name="medium", value="medium"),
+            discord.app_commands.Choice(name="high", value="high"),
+            discord.app_commands.Choice(name="xhigh — maximum reasoning", value="xhigh"),
+            discord.app_commands.Choice(name="reset — clear this session's override", value="reset"),
+            discord.app_commands.Choice(name="show — reveal reasoning in replies", value="show"),
+            discord.app_commands.Choice(name="hide — hide reasoning from replies", value="hide"),
+        ])
         async def slash_reasoning(interaction: discord.Interaction, effort: str = ""):
             await self._run_simple_slash(interaction, f"/reasoning {effort}".strip())
 
@@ -3678,6 +3695,17 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="usage", description="Show token usage for this session")
         async def slash_usage(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/usage")
+
+        @tree.command(name="tokens", description="Toggle a per-message token breakdown on replies")
+        @discord.app_commands.describe(state="on (this session), off, always (all chats), or status")
+        @discord.app_commands.choices(state=[
+            discord.app_commands.Choice(name="on — show token breakdown in this session", value="on"),
+            discord.app_commands.Choice(name="off — hide token breakdown (clears global)", value="off"),
+            discord.app_commands.Choice(name="always — show in every conversation", value="always"),
+            discord.app_commands.Choice(name="status — show current setting", value="status"),
+        ])
+        async def slash_tokens(interaction: discord.Interaction, state: str = ""):
+            await self._run_simple_slash(interaction, f"/tokens {state}".strip())
 
         @tree.command(name="help", description="Show available commands")
         async def slash_help(interaction: discord.Interaction):

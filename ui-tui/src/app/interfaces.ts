@@ -175,6 +175,7 @@ export interface UiState {
   sessionTitle: string
   showCost: boolean
   showReasoning: boolean
+  showTokens: boolean
   indicatorStyle: IndicatorStyle
   sid: null | string
   status: string

@@ -152,6 +152,7 @@ const TranscriptPane = memo(function TranscriptPane({
                     { commandOverride: ui.detailsModeCommandOverride, detailsMode: ui.detailsMode, sections: ui.sections }
                   )}
                   sections={ui.sections}
+                  showTokens={ui.showTokens}
                   t={ui.theme}
                 />
               )}
