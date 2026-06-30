@@ -3694,8 +3694,16 @@ def run_conversation(
                     # the prompt-tail row not having been flushed before this
                     # usage arrived (the assistant row, packed pre-append,
                     # always persists).
-                    from hermes_token_codec import attribute_input_tokens_to_prompt_tail
+                    from hermes_token_codec import (
+                        attribute_input_tokens_to_prompt_tail,
+                        log_input_pack_verification,
+                    )
                     attribute_input_tokens_to_prompt_tail(messages, canonical_usage)
+                    log_input_pack_verification(
+                        getattr(agent, "session_id", None),
+                        messages[-1] if messages else None,
+                        canonical_usage,
+                    )
                     # Forward canonical token + cache buckets so context engines
                     # can make decisions on cache hit ratios / reasoning costs,
                     # not just legacy aggregate tokens. Legacy keys stay for
