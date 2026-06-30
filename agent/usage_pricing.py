@@ -1325,6 +1325,10 @@ def normalize_usage(
     if output_details:
         reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
     if not reasoning_tokens:
+        # Chat Completions providers (DeepSeek thinking, OpenAI o-series via
+        # chat, etc.) report reasoning under completion_tokens_details, NOT the
+        # Responses-API output_tokens_details. Upstream already added this same
+        # fix, so the fork commit is a no-op here.
         completion_details = getattr(response_usage, "completion_tokens_details", None)
         if completion_details:
             reasoning_tokens = _to_int(
