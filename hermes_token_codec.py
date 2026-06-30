@@ -149,3 +149,76 @@ def resolve_message_tokens(role: str, token_count: Optional[int]) -> dict:
     out["input"]      = d.get("total_input_tokens", 0)
     out["cache_read"] = d.get("cache_read_tokens", 0)
     return out
+
+
+# ── Optional live per-turn write-path verification ──────────────────────────
+# When the env var HERMES_TOKEN_VERIFY_LOG points at a writable path, the agent
+# write path logs, for every turn, the API-reported usage alongside the value it
+# bit-packed into token_count — so packing can be checked against the provider
+# response in real time, not just post-hoc against the DB. OFF by default (env
+# unset → these are no-ops with one cheap dict lookup). Every call is wrapped so
+# a logging fault can never disturb the agent loop. (#token-verify)
+
+def _verify_append(line: str) -> None:
+    import os
+    path = os.environ.get("HERMES_TOKEN_VERIFY_LOG")
+    if not path:
+        return
+    try:
+        import time
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+    except Exception:
+        pass
+
+
+def log_assistant_pack_verification(session_id, token_count, usage) -> None:
+    """Log the API output/reasoning vs the value packed onto the assistant row.
+
+    No-op unless HERMES_TOKEN_VERIFY_LOG is set; fully exception-guarded.
+    """
+    import os
+    if not os.environ.get("HERMES_TOKEN_VERIFY_LOG"):
+        return
+    try:
+        b = resolve_message_tokens("assistant", token_count)
+        api_out = int(getattr(usage, "output_tokens", 0) or 0)
+        api_rsn = int(getattr(usage, "reasoning_tokens", 0) or 0)
+        ok = b["output"] == min(api_out, _V1_MAX) and b["reasoning"] == min(api_rsn, _V2_MAX)
+        _verify_append(
+            f"sess={session_id} assistant API(out={api_out},rsn={api_rsn}) "
+            f"PACKED(out={b['output']},rsn={b['reasoning']}) {'OK' if ok else 'MISMATCH'}"
+        )
+    except Exception:
+        pass
+
+
+def log_input_pack_verification(session_id, tail, usage) -> None:
+    """Log the API prompt/cache vs the value packed onto the prompt-tail row.
+
+    ``tail`` is ``messages[-1]`` after attribute_input_tokens_to_prompt_tail; a
+    non-packed tail (attribution skipped, e.g. assistant tail) logs as SKIP so
+    every turn is visible. No-op unless HERMES_TOKEN_VERIFY_LOG is set; guarded.
+    """
+    import os
+    if not os.environ.get("HERMES_TOKEN_VERIFY_LOG"):
+        return
+    try:
+        api_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+        api_cache = int(getattr(usage, "cache_read_tokens", 0) or 0)
+        tc = tail.get("token_count") if isinstance(tail, dict) else None
+        if tc is None or tc >= 0:
+            role = tail.get("role") if isinstance(tail, dict) else None
+            _verify_append(
+                f"sess={session_id} input     API(in={api_in},cache={api_cache}) "
+                f"PACKED(skipped tail role={role}) SKIP"
+            )
+            return
+        b = resolve_message_tokens(tail.get("role", ""), tc)
+        ok = b["input"] == min(api_in, _V1_MAX) and b["cache_read"] == min(api_cache, _V2_MAX)
+        _verify_append(
+            f"sess={session_id} input     API(in={api_in},cache={api_cache}) "
+            f"PACKED(in={b['input']},cache={b['cache_read']}) {'OK' if ok else 'MISMATCH'}"
+        )
+    except Exception:
+        pass
