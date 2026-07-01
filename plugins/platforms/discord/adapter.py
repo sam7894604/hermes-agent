@@ -12,7 +12,7 @@ Uses discord.py library for:
 import asyncio
 import datetime as dt
 import hashlib
-import inspect
+import io
 import json
 import logging
 import math
@@ -3101,28 +3101,28 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 return result
 
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            # Build the ordered send items: text chunks and/or inline table
+            # images. Tables split the message in place (text → image → text).
+            outgoing = self._build_outgoing_items(content)
+            has_image = any("image" in item for item in outgoing)
 
             message_ids = []
             # Build the reference from ids — no fetch_message round trip.
             reference = self._reply_reference_for_send(reply_to, channel)
 
-            for i, chunk in enumerate(chunks):
+            for i, item in enumerate(outgoing):
                 if self._reply_to_mode == "all":
-                    chunk_reference = reference
+                    item_reference = reference
                 else:  # "first" (default) or "off"
-                    chunk_reference = reference if i == 0 else None
+                    item_reference = reference if i == 0 else None
                 try:
                     msg = await channel.send(
-                        content=chunk,
-                        reference=chunk_reference,
+                        **self._discord_send_kwargs(item, item_reference)
                     )
                 except Exception as e:
                     err_text = str(e)
                     if (
-                        chunk_reference is not None
+                        item_reference is not None
                         and (
                             (
                                 "error code: 50035" in err_text
@@ -3138,12 +3138,15 @@ class DiscordAdapter(BasePlatformAdapter):
                         )
                         reference = None
                         msg = await channel.send(
-                            content=chunk,
-                            reference=None,
+                            **self._discord_send_kwargs(item, None)
                         )
                     else:
                         raise
                 message_ids.append(str(msg.id))
+                # Keep multi-message ordering stable when images are interleaved
+                # with text (Discord can reorder sends within the same tick).
+                if has_image and i < len(outgoing) - 1:
+                    await asyncio.sleep(0.05)
 
             # Track the last message we sent in this channel for history
             # backfill — avoids a full channel.history() scan on hot paths.
@@ -5634,11 +5637,253 @@ class DiscordAdapter(BasePlatformAdapter):
 
         return "".join(parts) if changed else content
 
+    # ------------------------------------------------------------------
+    # Markdown table → PNG image (deterministic Pillow render)
+    #
+    # A code block can't align CJK text (Discord reaches CJK via a font
+    # fallback whose glyphs aren't a clean multiple of the space width), so
+    # for the primary send path we render each table to a PNG with Pillow —
+    # pixel-accurate alignment for any script. The message is split at the
+    # table's position so the image lands inline between the surrounding
+    # prose (text-before → image → text-after). If Pillow or a font is
+    # unavailable, callers fall back to the monospace code block.
+    # ------------------------------------------------------------------
+    _TABLE_IMG_FONT_SIZE = 30
+    _TABLE_IMG_PAD_X = 18
+    _TABLE_IMG_PAD_Y = 12
+    _TABLE_IMG_BG = (49, 51, 56)         # Discord dark chat background
+    _TABLE_IMG_HEADER_BG = (43, 45, 49)
+    _TABLE_IMG_GRID = (78, 80, 88)
+    _TABLE_IMG_TEXT = (219, 222, 225)
+    _TABLE_IMG_HEADER_TEXT = (255, 255, 255)
+    _TABLE_IMG_FILENAME = "table.png"
+    # (regular, bold) font pairs, tried in order across Linux/Windows/macOS.
+    _TABLE_FONT_CANDIDATES = [
+        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+         "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"),
+        ("C:/Windows/Fonts/msjh.ttc", "C:/Windows/Fonts/msjhbd.ttc"),   # JhengHei (TC)
+        ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc"),   # YaHei (SC)
+        ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/PingFang.ttc"),
+    ]
+    _table_font_cache: dict = {}
+
+    @classmethod
+    def _split_message_parts(cls, content: str) -> List[dict]:
+        """Split *content* into ordered parts, isolating each markdown table.
+
+        Returns a list of ``{"type": "text", "text": str}`` and
+        ``{"type": "table", "header": str, "rows": [str, ...]}`` dicts, in
+        document order. Tables inside triple-backtick fences stay as text.
+        Content with no table comes back as a single text part.
+        """
+        if not content or "|" not in content:
+            return [{"type": "text", "text": content}]
+
+        parts: List[dict] = []
+
+        def add_text(s: str) -> None:
+            if not s:
+                return
+            if parts and parts[-1]["type"] == "text":
+                parts[-1]["text"] += s
+            else:
+                parts.append({"type": "text", "text": s})
+
+        FENCE = "```"
+        segments = content.split(FENCE)
+        for idx, seg in enumerate(segments):
+            if idx % 2 == 1:  # inside a fenced code block → keep as text
+                add_text(f"{FENCE}{seg}{FENCE}")
+                continue
+            lines = seg.split("\n")
+            n = len(lines)
+            buf: List[str] = []
+            i = 0
+            while i < n:
+                if (
+                    i + 1 < n
+                    and cls._looks_like_table_row(lines[i])
+                    and cls._looks_like_separator_row(lines[i + 1])
+                ):
+                    header = lines[i]
+                    j = i + 2
+                    data: List[str] = []
+                    while j < n and cls._looks_like_table_row(lines[j]):
+                        data.append(lines[j])
+                        j += 1
+                    add_text("\n".join(buf))
+                    buf = []
+                    parts.append({"type": "table", "header": header, "rows": data})
+                    i = j
+                else:
+                    buf.append(lines[i])
+                    i += 1
+            add_text("\n".join(buf))
+
+        return parts or [{"type": "text", "text": content}]
+
+    @classmethod
+    def _load_table_fonts(cls, size: int):
+        """Return ``(regular, bold)`` PIL fonts for table rendering, or
+        ``(None, None)`` if Pillow or a suitable font is unavailable. Cached
+        per size."""
+        if size in cls._table_font_cache:
+            return cls._table_font_cache[size]
+        result = (None, None)
+        try:
+            from PIL import ImageFont
+            for reg, bold in cls._TABLE_FONT_CANDIDATES:
+                try:
+                    font = ImageFont.truetype(reg, size)
+                except Exception:
+                    continue
+                try:
+                    font_b = ImageFont.truetype(bold, size)
+                except Exception:
+                    font_b = font
+                result = (font, font_b)
+                break
+        except Exception:
+            result = (None, None)
+        cls._table_font_cache[size] = result
+        return result
+
+    @classmethod
+    def _render_table_image(cls, header_line: str, data_lines: list) -> Optional[bytes]:
+        """Render a markdown table to PNG bytes (deterministic — Pillow only,
+        no AI). Returns ``None`` if Pillow/font is unavailable, the table has
+        no columns, or rendering fails, so callers can fall back to text."""
+        try:
+            from PIL import Image, ImageDraw
+        except Exception:
+            return None
+        try:
+            font, font_b = cls._load_table_fonts(cls._TABLE_IMG_FONT_SIZE)
+            if font is None:
+                return None
+
+            headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
+            ncols = len(headers)
+            if ncols == 0 or (ncols == 1 and not headers[0]):
+                return None
+            rows = []
+            for line in data_lines:
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                cells = (cells + [""] * ncols)[:ncols]
+                rows.append(cells)
+
+            measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
+            def _tw(s: str, f) -> int:
+                return int(measure.textlength(s, font=f)) if s else 0
+
+            padx, pady = cls._TABLE_IMG_PAD_X, cls._TABLE_IMG_PAD_Y
+            col_w = []
+            for c in range(ncols):
+                w = _tw(headers[c], font_b)
+                for r in rows:
+                    w = max(w, _tw(r[c], font))
+                col_w.append(w + 2 * padx)
+
+            ascent, descent = font.getmetrics()
+            row_h = ascent + descent + 2 * pady
+            width = sum(col_w) + 1
+            height = row_h * (len(rows) + 1) + 1
+
+            img = Image.new("RGB", (width, height), cls._TABLE_IMG_BG)
+            dr = ImageDraw.Draw(img)
+            dr.rectangle([0, 0, width, row_h], fill=cls._TABLE_IMG_HEADER_BG)
+
+            xs = [0]
+            for w in col_w:
+                xs.append(xs[-1] + w)
+            for x in xs:
+                dr.line([(x, 0), (x, height)], fill=cls._TABLE_IMG_GRID, width=1)
+            for ri in range(len(rows) + 2):
+                y = ri * row_h
+                dr.line([(0, y), (width, y)], fill=cls._TABLE_IMG_GRID, width=1)
+
+            def _draw_row(ri: int, cells: list, f, color) -> None:
+                y = ri * row_h + pady
+                for c in range(ncols):
+                    dr.text((xs[c] + padx, y), cells[c], font=f, fill=color)
+
+            _draw_row(0, headers, font_b, cls._TABLE_IMG_HEADER_TEXT)
+            for i, r in enumerate(rows, start=1):
+                _draw_row(i, r, font, cls._TABLE_IMG_TEXT)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[Discord] table image render failed: %s", e)
+            return None
+
+    def _build_outgoing_items(self, content: str) -> List[dict]:
+        """Turn *content* into an ordered list of send items, each either
+        ``{"content": str}`` (a text chunk) or ``{"image": bytes}`` (a rendered
+        table PNG).
+
+        When no table renders to an image (no tables, or Pillow/font missing)
+        the original inline behaviour is preserved: the whole message is
+        code-block-formatted and chunked. Otherwise the message is split at
+        each table so images land inline between the surrounding prose.
+        """
+        parts = self._split_message_parts(content)
+        for p in parts:
+            if p["type"] == "table":
+                p["image"] = self._render_table_image(p["header"], p["rows"])
+
+        if not any(p.get("image") for p in parts):
+            # No table images → unchanged inline path (code-block fallback).
+            formatted = self.format_message(content)
+            return [
+                {"content": chunk}
+                for chunk in self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            ]
+
+        items: List[dict] = []
+        for p in parts:
+            if p["type"] == "table" and p.get("image"):
+                items.append({"image": p["image"]})
+                continue
+            if p["type"] == "table":  # image failed for this one → code block
+                text = self._render_table_text(p["header"], p["rows"]) or ""
+            else:
+                text = self.format_message(p["text"])
+            # Each part is its own message; trim the surrounding whitespace the
+            # split left behind (Discord would strip it anyway).
+            text = text.strip()
+            if not text:
+                continue
+            for chunk in self.truncate_message(text, self.MAX_MESSAGE_LENGTH):
+                if chunk.strip():
+                    items.append({"content": chunk})
+        return items
+
+    @classmethod
+    def _discord_send_kwargs(cls, item: dict, reference) -> dict:
+        """Build ``channel.send(**kwargs)`` for one outgoing item. A fresh
+        ``discord.File`` is constructed each call because its stream is
+        consumed on send — a retry needs a new one."""
+        if "image" in item:
+            return {
+                "file": discord.File(
+                    io.BytesIO(item["image"]), filename=cls._TABLE_IMG_FILENAME
+                ),
+                "reference": reference,
+            }
+        return {"content": item["content"], "reference": reference}
+
     def format_message(self, content: str) -> str:
         """Format message for Discord.
 
-        Discord does not render markdown tables, so each one is re-rendered as
-        an aligned monospace code block (kept inline within the message).
+        Discord does not render markdown tables. The primary ``send()`` path
+        renders them to inline images; this text fallback (used by the forum
+        and edit paths, and when image rendering is unavailable) re-renders
+        each table as an aligned monospace code block.
         """
         return self._convert_tables_to_code_blocks(content)
 
