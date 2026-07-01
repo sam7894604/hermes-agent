@@ -490,6 +490,39 @@ class TestConvertTablesToCodeBlocks:
         assert DiscordAdapter._display_width("abc") == 3
         assert DiscordAdapter._display_width("A項") == 3
 
+    def test_code_block_strips_markdown_markers(self):
+        # **bold** must not appear literally, and columns align on the
+        # visible ("¥0.04") text, not the marker-laden source.
+        text = "| a | b |\n|---|---|\n| x | **¥0.04** |"
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        assert "**" not in out
+        assert "¥0.04" in out
+
+
+class TestInlineMarkdown:
+    def test_bold_run(self):
+        assert DiscordAdapter._parse_inline_md("**hi**") == [("hi", frozenset({"b"}))]
+
+    def test_mixed_runs(self):
+        runs = DiscordAdapter._parse_inline_md("a **b** c")
+        assert runs == [
+            ("a ", frozenset()),
+            ("b", frozenset({"b"})),
+            (" c", frozenset()),
+        ]
+
+    def test_bold_italic_and_code_and_strike(self):
+        assert DiscordAdapter._parse_inline_md("***x***") == [("x", frozenset({"b", "i"}))]
+        assert DiscordAdapter._parse_inline_md("`c`") == [("c", frozenset({"c"}))]
+        assert DiscordAdapter._parse_inline_md("~~s~~") == [("s", frozenset({"s"}))]
+
+    def test_unmatched_marker_kept_literal(self):
+        assert DiscordAdapter._parse_inline_md("a * b") == [("a * b", frozenset())]
+
+    def test_strip_inline_md(self):
+        assert DiscordAdapter._strip_inline_md("**¥0.04**") == "¥0.04"
+        assert DiscordAdapter._strip_inline_md("plain") == "plain"
+
     def test_no_pipes_returns_unchanged_identity(self):
         text = "just a normal sentence"
         assert DiscordAdapter._convert_tables_to_code_blocks(text) is text
