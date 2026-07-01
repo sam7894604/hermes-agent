@@ -5519,6 +5519,52 @@ class DiscordAdapter(BasePlatformAdapter):
             2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s
         )
 
+    # Inline markdown delimiters, longest first. Flags: b bold, i italic,
+    # s strikethrough, c code ("bi" = bold+italic).
+    _MD_INLINE_DELIMS = (("***", "bi"), ("**", "b"), ("*", "i"), ("~~", "s"), ("`", "c"))
+
+    @classmethod
+    def _parse_inline_md(cls, text: str, active: frozenset = frozenset()) -> list:
+        """Parse inline markdown in *text* into ``[(segment, flags), ...]``,
+        where ``flags`` is a subset of ``{'b','i','s','c'}``. Unmatched markers
+        are kept literal. Used to render bold/etc. instead of showing the raw
+        ``**`` markers.
+        """
+        runs: list = []
+        buf: List[str] = []
+
+        def _flush() -> None:
+            if buf:
+                runs.append(("".join(buf), active))
+                buf.clear()
+
+        i, n = 0, len(text)
+        while i < n:
+            matched = False
+            for delim, flag in cls._MD_INLINE_DELIMS:
+                if text.startswith(delim, i):
+                    close = text.find(delim, i + len(delim))
+                    if close != -1 and close > i + len(delim):
+                        inner = text[i + len(delim):close]
+                        _flush()
+                        if flag == "c":  # code span: literal, no nested parse
+                            runs.append((inner, active | {"c"}))
+                        else:
+                            runs.extend(cls._parse_inline_md(inner, active | set(flag)))
+                        i = close + len(delim)
+                        matched = True
+                        break
+            if not matched:
+                buf.append(text[i])
+                i += 1
+        _flush()
+        return runs
+
+    @classmethod
+    def _strip_inline_md(cls, text: str) -> str:
+        """Plain text with inline-markdown markers removed."""
+        return "".join(t for t, _ in cls._parse_inline_md(text))
+
     @classmethod
     def _render_table_text(cls, header_line: str, data_lines: list) -> Optional[str]:
         """Render a markdown table as an aligned monospace ``` code block.
@@ -5528,14 +5574,14 @@ class DiscordAdapter(BasePlatformAdapter):
         code-block font. Rows are padded/truncated to the header's column
         count. Returns ``None`` when there are no columns to render.
         """
-        headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
+        headers = [cls._strip_inline_md(h.strip()) for h in header_line.strip().strip("|").split("|")]
         ncols = len(headers)
         if ncols == 0 or (ncols == 1 and not headers[0]):
             return None
 
         rows = []
         for line in data_lines:
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            cells = [cls._strip_inline_md(c.strip()) for c in line.strip().strip("|").split("|")]
             if len(cells) < ncols:
                 cells += [""] * (ncols - len(cells))
             elif len(cells) > ncols:
@@ -5740,27 +5786,41 @@ class DiscordAdapter(BasePlatformAdapter):
             if font is None:
                 return None
 
-            headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
-            ncols = len(headers)
-            if ncols == 0 or (ncols == 1 and not headers[0]):
+            def _cells(line: str) -> list:
+                return [c.strip() for c in line.strip().strip("|").split("|")]
+
+            header_cells = _cells(header_line)
+            ncols = len(header_cells)
+            if ncols == 0 or (ncols == 1 and not header_cells[0]):
                 return None
+            # Parse inline markdown (**bold** etc.) into styled runs per cell.
+            headers = [cls._parse_inline_md(c) for c in header_cells]
             rows = []
             for line in data_lines:
-                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                cells = _cells(line)
                 cells = (cells + [""] * ncols)[:ncols]
-                rows.append(cells)
+                rows.append([cls._parse_inline_md(c) for c in cells])
 
             measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
 
-            def _tw(s: str, f) -> int:
-                return int(measure.textlength(s, font=f)) if s else 0
+            def _font(flags, header: bool):
+                # Header cells are bold; body cells bold only for **bold** runs.
+                # (No CJK italic/mono face exists, so those flags don't change
+                # the glyphs — the markers are simply stripped.)
+                return font_b if (header or "b" in flags) else font
+
+            def _runs_width(runs, header: bool) -> int:
+                return sum(
+                    int(measure.textlength(t, font=_font(fl, header)))
+                    for t, fl in runs if t
+                )
 
             padx, pady = cls._TABLE_IMG_PAD_X, cls._TABLE_IMG_PAD_Y
             col_w = []
             for c in range(ncols):
-                w = _tw(headers[c], font_b)
+                w = _runs_width(headers[c], True)
                 for r in rows:
-                    w = max(w, _tw(r[c], font))
+                    w = max(w, _runs_width(r[c], False))
                 col_w.append(w + 2 * padx)
 
             ascent, descent = font.getmetrics()
@@ -5781,14 +5841,27 @@ class DiscordAdapter(BasePlatformAdapter):
                 y = ri * row_h
                 dr.line([(0, y), (width, y)], fill=cls._TABLE_IMG_GRID, width=1)
 
-            def _draw_row(ri: int, cells: list, f, color) -> None:
-                y = ri * row_h + pady
-                for c in range(ncols):
-                    dr.text((xs[c] + padx, y), cells[c], font=f, fill=color)
+            strike_y = pady + ascent // 2
 
-            _draw_row(0, headers, font_b, cls._TABLE_IMG_HEADER_TEXT)
+            def _draw_cell(ci: int, ri: int, runs, header: bool, color) -> None:
+                x = xs[ci] + padx
+                y = ri * row_h + pady
+                for t, fl in runs:
+                    if not t:
+                        continue
+                    f = _font(fl, header)
+                    dr.text((x, y), t, font=f, fill=color)
+                    w = int(measure.textlength(t, font=f))
+                    if "s" in fl:  # strikethrough
+                        yy = ri * row_h + strike_y
+                        dr.line([(x, yy), (x + w, yy)], fill=color, width=2)
+                    x += w
+
+            for c in range(ncols):
+                _draw_cell(c, 0, headers[c], True, cls._TABLE_IMG_HEADER_TEXT)
             for i, r in enumerate(rows, start=1):
-                _draw_row(i, r, font, cls._TABLE_IMG_TEXT)
+                for c in range(ncols):
+                    _draw_cell(c, i, r[c], False, cls._TABLE_IMG_TEXT)
 
             buf = io.BytesIO()
             img.save(buf, format="PNG")
