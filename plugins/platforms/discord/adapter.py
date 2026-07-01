@@ -3475,39 +3475,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Format and split message if needed
             formatted = self.format_message(content)
-
-            # Auto-convert markdown tables → inline embed fields. Discord does
-            # not render markdown tables, so they arrive as walls of raw pipes;
-            # each table is lifted into a discord.Embed sent ahead of the
-            # surrounding prose, then stripped from the message body.
-            cleaned, table_embeds = self._convert_tables_to_embeds(formatted)
-            embed_message_ids: List[str] = []
-            for embed in table_embeds:
-                try:
-                    em = await channel.send(embed=embed)
-                    em_id = getattr(em, "id", None)
-                    if em_id is not None:
-                        embed_message_ids.append(str(em_id))
-                    await asyncio.sleep(0.05)  # preserve ordering under rate limits
-                except Exception as e:
-                    logger.warning("[%s] Failed to send table embed: %s", self.name, e)
-            if table_embeds:
-                formatted = cleaned
-
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
-            # Seed with the table-embed message IDs so a table-only message
-            # (whose text body is now empty) still reports a real message_id.
-            message_ids = list(embed_message_ids)
+            message_ids = []
             # Build the reference from ids — no fetch_message round trip.
             reference = self._reply_reference_for_send(reply_to, channel)
 
             for i, chunk in enumerate(chunks):
-                # Skip empty/whitespace-only chunks — Discord rejects empty
-                # content. This happens when a message was nothing but a table
-                # (now sent as an embed above, leaving an empty text body).
-                if not chunk.strip():
-                    continue
                 if self._reply_to_mode == "all":
                     chunk_reference = reference
                 else:  # "first" (default) or "off"
@@ -5894,15 +5868,15 @@ class DiscordAdapter(BasePlatformAdapter):
             print(f"[{self.name}] Updated DISCORD_ALLOWED_USERS with {resolved_count} resolved ID(s)")
 
     # ------------------------------------------------------------------
-    # Markdown table → embed conversion
+    # Markdown table → monospace code block
     #
     # Discord does not render GitHub-flavored markdown tables — they arrive
-    # as walls of raw ``|`` pipes. We lift each table out of the message body
-    # into a ``discord.Embed`` (one inline field per column, values stacked by
-    # row) so it renders as an aligned grid instead.
+    # as walls of raw ``|`` pipes whose columns don't line up in the default
+    # proportional font. We re-render each table as an aligned, fixed-width
+    # grid wrapped in a ``` code block so the pipes line up and the table
+    # stays inline within its message (unlike an embed, which detaches it).
     # ------------------------------------------------------------------
     _TABLE_SEP_CELL_RE = re.compile(r":?-+:?")
-    _TABLE_ZWSP = "​"  # zero-width space — placeholder for empty cells
 
     @staticmethod
     def _looks_like_table_row(line: str) -> bool:
@@ -5925,23 +5899,18 @@ class DiscordAdapter(BasePlatformAdapter):
         return all(cls._TABLE_SEP_CELL_RE.fullmatch(c.strip()) for c in cells) and bool(cells)
 
     @classmethod
-    def _build_table_embed(cls, header_line: str, data_lines: list) -> Optional[Any]:
-        """Build a ``discord.Embed`` from a header row and its data rows.
+    def _render_table_text(cls, header_line: str, data_lines: list) -> Optional[str]:
+        """Render a markdown table as an aligned monospace ``` code block.
 
-        Returns ``None`` when there is nothing useful to render (no columns or
-        no data rows). Rows are padded/truncated to the header's column count;
-        empty cells become a zero-width space (Discord rejects empty field
-        values). Field values over 1024 chars are truncated with an ellipsis.
+        Each column is padded to its widest cell so the pipes line up under
+        Discord's fixed-width code-block font. Rows are padded/truncated to
+        the header's column count. Returns ``None`` when there are no columns
+        to render.
         """
         headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
         ncols = len(headers)
-        if ncols == 0:
+        if ncols == 0 or (ncols == 1 and not headers[0]):
             return None
-        # Discord caps an embed at 25 fields; a table wider than that is
-        # pathological — clamp so the API doesn't reject the whole embed.
-        if ncols > 25:
-            headers = headers[:25]
-            ncols = 25
 
         rows = []
         for line in data_lines:
@@ -5951,26 +5920,27 @@ class DiscordAdapter(BasePlatformAdapter):
             elif len(cells) > ncols:
                 cells = cells[:ncols]
             rows.append(cells)
-        if not rows:
-            return None
 
-        zwsp = cls._TABLE_ZWSP
-        embed = discord.Embed(color=discord.Color.blue())
-        for ci in range(ncols):
-            name = (headers[ci] or zwsp)[:256]  # Discord field-name cap
-            vals = "\n".join((row[ci] or zwsp) for row in rows)
-            if len(vals) > 1024:  # Discord field-value cap
-                vals = vals[:1023] + "…"
-            embed.add_field(name=name, value=vals or zwsp, inline=True)
-        return embed
+        widths = []
+        for c in range(ncols):
+            w = len(headers[c])
+            for r in rows:
+                w = max(w, len(r[c]))
+            widths.append(w)
+
+        def _fmt(cells: list) -> str:
+            return " | ".join(cells[c].ljust(widths[c]) for c in range(ncols)).rstrip()
+
+        out = [_fmt(headers), "-|-".join("-" * widths[c] for c in range(ncols))]
+        out.extend(_fmt(r) for r in rows)
+        return "```\n" + "\n".join(out) + "\n```"
 
     @classmethod
-    def _extract_tables_from_text(cls, text: str) -> Tuple[str, list]:
-        """Pull markdown tables out of *text* (already known to be outside any
-        code fence). Returns (text_without_tables, [embeds])."""
+    def _reflow_tables_in_segment(cls, text: str) -> str:
+        """Re-render markdown tables in *text* (already known to be outside any
+        code fence) as aligned code blocks, in place."""
         lines = text.split("\n")
         n = len(lines)
-        embeds: list = []
         out: List[str] = []
         i = 0
         while i < n:
@@ -5985,55 +5955,47 @@ class DiscordAdapter(BasePlatformAdapter):
                 while j < n and cls._looks_like_table_row(lines[j]):
                     data.append(lines[j])
                     j += 1
-                embed = cls._build_table_embed(header, data)
-                if embed is not None:
-                    embeds.append(embed)
-                    i = j  # drop the header, separator, and data lines
+                rendered = cls._render_table_text(header, data)
+                if rendered is not None:
+                    out.append(rendered)  # replaces header + separator + data
+                    i = j
                     continue
             out.append(lines[i])
             i += 1
-        return "\n".join(out), embeds
+        return "\n".join(out)
 
     @classmethod
-    def _convert_tables_to_embeds(cls, content: str) -> Tuple[str, list]:
-        """Scan *content* for markdown tables outside code blocks and convert
-        each into a ``discord.Embed`` with one inline field per column.
-
-        Tables inside triple-backtick fences are preserved verbatim. Returns
-        ``(cleaned_text, embeds)``; when no tables are found the original
-        content is returned unchanged with an empty embed list.
+    def _convert_tables_to_code_blocks(cls, content: str) -> str:
+        """Wrap each markdown table in *content* in an aligned monospace code
+        block, leaving everything else (including tables already inside
+        triple-backtick fences) untouched. Returns *content* unchanged when it
+        contains no convertible table.
         """
-        if not DISCORD_AVAILABLE or not content or "|" not in content:
-            return content, []
+        if not content or "|" not in content:
+            return content
 
         FENCE = "```"
         segments = content.split(FENCE)
-        embeds: list = []
         parts: List[str] = []
+        changed = False
         for idx, seg in enumerate(segments):
             if idx % 2 == 1:  # inside a fenced code block → keep verbatim
                 parts.append(f"{FENCE}{seg}{FENCE}")
                 continue
-            cleaned_seg, seg_embeds = cls._extract_tables_from_text(seg)
-            parts.append(cleaned_seg)
-            embeds.extend(seg_embeds)
+            reflowed = cls._reflow_tables_in_segment(seg)
+            parts.append(reflowed)
+            if reflowed != seg:
+                changed = True
 
-        if not embeds:
-            return content, []
-
-        cleaned = "".join(parts)
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-        return cleaned, embeds
+        return "".join(parts) if changed else content
 
     def format_message(self, content: str) -> str:
         """Format message for Discord.
 
-        Converts GFM markdown tables to bullet-list groups since Discord
-        does not render pipe tables natively.
+        Discord does not render markdown tables, so each one is re-rendered as
+        an aligned monospace code block (kept inline within the message).
         """
-        if not content:
-            return content
-        return convert_table_to_bullets(content)
+        return self._convert_tables_to_code_blocks(content)
 
     async def _run_simple_slash(
         self,
