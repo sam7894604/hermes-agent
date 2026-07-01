@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import traceback
+import unicodedata
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -5898,14 +5899,28 @@ class DiscordAdapter(BasePlatformAdapter):
         cells = s.strip("|").split("|")
         return all(cls._TABLE_SEP_CELL_RE.fullmatch(c.strip()) for c in cells) and bool(cells)
 
+    @staticmethod
+    def _display_width(s: str) -> int:
+        """Monospace display width of *s*.
+
+        East-Asian Wide/Fullwidth characters (CJK) render as two cells in
+        Discord's fixed-width code-block font, but ``len()`` counts them as
+        one — so padding by ``len`` misaligns any column containing CJK text.
+        Count W/F as 2, everything else as 1. (Not exact for ambiguous-width
+        glyphs or emoji, but correct for the common CJK case.)
+        """
+        return sum(
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s
+        )
+
     @classmethod
     def _render_table_text(cls, header_line: str, data_lines: list) -> Optional[str]:
         """Render a markdown table as an aligned monospace ``` code block.
 
-        Each column is padded to its widest cell so the pipes line up under
-        Discord's fixed-width code-block font. Rows are padded/truncated to
-        the header's column count. Returns ``None`` when there are no columns
-        to render.
+        Each column is padded to its widest cell (by display width, so CJK
+        text stays aligned) so the pipes line up under Discord's fixed-width
+        code-block font. Rows are padded/truncated to the header's column
+        count. Returns ``None`` when there are no columns to render.
         """
         headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
         ncols = len(headers)
@@ -5923,13 +5938,16 @@ class DiscordAdapter(BasePlatformAdapter):
 
         widths = []
         for c in range(ncols):
-            w = len(headers[c])
+            w = cls._display_width(headers[c])
             for r in rows:
-                w = max(w, len(r[c]))
+                w = max(w, cls._display_width(r[c]))
             widths.append(w)
 
+        def _pad(s: str, w: int) -> str:
+            return s + " " * (w - cls._display_width(s))
+
         def _fmt(cells: list) -> str:
-            return " | ".join(cells[c].ljust(widths[c]) for c in range(ncols)).rstrip()
+            return " | ".join(_pad(cells[c], widths[c]) for c in range(ncols)).rstrip()
 
         out = [_fmt(headers), "-|-".join("-" * widths[c] for c in range(ncols))]
         out.extend(_fmt(r) for r in rows)
