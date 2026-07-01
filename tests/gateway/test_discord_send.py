@@ -540,16 +540,57 @@ class TestConvertTablesToCodeBlocks:
         assert out.startswith("```\n") and out.endswith("\n```")
 
 
+# ---------------------------------------------------------------------------
+# Message splitting (text / table parts) + inline table image
+# ---------------------------------------------------------------------------
+
+
+class TestSplitMessageParts:
+    def test_no_table_single_text_part(self):
+        assert DiscordAdapter._split_message_parts("hello world") == [
+            {"type": "text", "text": "hello world"}
+        ]
+
+    def test_table_between_prose_splits_in_order(self):
+        parts = DiscordAdapter._split_message_parts(
+            "intro\n| A | B |\n|---|---|\n| 1 | 2 |\nouttro"
+        )
+        assert [p["type"] for p in parts] == ["text", "table", "text"]
+        assert parts[0]["text"].strip() == "intro"
+        assert parts[1]["header"] == "| A | B |"
+        assert parts[1]["rows"] == ["| 1 | 2 |"]
+        assert parts[2]["text"].strip() == "outtro"
+
+    def test_table_inside_code_fence_stays_text(self):
+        text = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["text"]
+
+    def test_pipes_in_prose_stay_text(self):
+        parts = DiscordAdapter._split_message_parts("use the | pipe | here")
+        assert [p["type"] for p in parts] == ["text"]
+
+    def test_two_tables(self):
+        parts = DiscordAdapter._split_message_parts(
+            "| A |\n|---|\n| 1 |\n\nmid\n\n| B |\n|---|\n| 2 |"
+        )
+        assert [p["type"] for p in parts] == ["table", "text", "table"]
+        assert parts[1]["text"].strip() == "mid"
+
+
 @pytest.mark.asyncio
-async def test_send_wraps_table_in_code_block_inline():
-    """A message with a table is sent as a single inline message whose table
-    is wrapped in an aligned code block — no separate embed message."""
+async def test_send_splits_table_into_inline_image(monkeypatch):
+    """A table renders to a PNG that is sent inline between the surrounding
+    prose: text-before → image → text-after, in order."""
+    monkeypatch.setattr(
+        DiscordAdapter, "_render_table_image", classmethod(lambda cls, h, d: b"PNGDATA")
+    )
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
 
     sent = []
 
-    async def fake_send(*, content=None, reference=None):
-        sent.append(content)
+    async def fake_send(*, content=None, file=None, reference=None):
+        sent.append({"content": content, "file": file})
         return SimpleNamespace(id=len(sent))
 
     channel = SimpleNamespace(
@@ -561,9 +602,54 @@ async def test_send_wraps_table_in_code_block_inline():
         fetch_channel=AsyncMock(),
     )
 
-    body = "intro\n\n| A | B |\n|---|---|\n| 1 | 22 |\n\noutro"
+    body = "intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nouttro"
     result = await adapter.send("123", body)
 
     assert result.success is True
-    assert len(sent) == 1  # single inline message, no detached embed
-    assert sent[0] == "intro\n\n```\nA | B\n--|---\n1 | 22\n```\n\noutro"
+    assert len(sent) == 3
+    assert sent[0]["content"] == "intro" and sent[0]["file"] is None
+    assert sent[1]["file"] is not None and sent[1]["content"] is None  # the image
+    assert sent[2]["content"] == "outtro" and sent[2]["file"] is None
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_code_block_when_no_image(monkeypatch):
+    """When image rendering is unavailable, the table is sent inline as an
+    aligned code block in a single message (original behaviour)."""
+    monkeypatch.setattr(
+        DiscordAdapter, "_render_table_image", classmethod(lambda cls, h, d: None)
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    sent = []
+
+    async def fake_send(*, content=None, file=None, reference=None):
+        sent.append({"content": content, "file": file})
+        return SimpleNamespace(id=len(sent))
+
+    channel = SimpleNamespace(
+        send=AsyncMock(side_effect=fake_send),
+        fetch_message=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.send("123", "intro\n\n| A | B |\n|---|---|\n| 1 | 22 |\n\nouttro")
+
+    assert result.success is True
+    assert len(sent) == 1  # single inline message
+    assert sent[0]["file"] is None
+    assert sent[0]["content"] == "intro\n\n```\nA | B\n--|---\n1 | 22\n```\n\nouttro"
+
+
+def test_render_table_image_produces_png_when_font_available():
+    """If a CJK/Latin font is present, rendering yields real PNG bytes;
+    otherwise it returns None (and callers fall back to text)."""
+    font, _ = DiscordAdapter._load_table_fonts(DiscordAdapter._TABLE_IMG_FONT_SIZE)
+    png = DiscordAdapter._render_table_image("| 項目 | 值 |", ["| 稱呼 | 叔鼠 |"])
+    if font is None:
+        assert png is None
+    else:
+        assert png is not None and png[:8] == b"\x89PNG\r\n\x1a\n"
