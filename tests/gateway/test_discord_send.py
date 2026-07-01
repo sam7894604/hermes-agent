@@ -392,6 +392,11 @@ def _code_block_lines(text):
     return [ln for ln in inner.split("\n") if ln != ""]
 
 
+def _east_asian_wide(ch):
+    import unicodedata
+    return unicodedata.east_asian_width(ch) in ("W", "F")
+
+
 class TestConvertTablesToCodeBlocks:
     def test_tiny_table_exact_alignment(self):
         # Widths: col0=1 ("A"/"1"), col1=2 ("B"/"22"). Pipes must line up.
@@ -455,6 +460,35 @@ class TestConvertTablesToCodeBlocks:
         out = DiscordAdapter._convert_tables_to_code_blocks(text)
         assert out.count("```") == 4  # two fenced blocks (open+close each)
         assert "\n\nmiddle\n\n" in out
+
+    def test_cjk_columns_align_by_display_width(self):
+        # CJK glyphs render 2 cells wide in Discord's monospace font. Padding
+        # must use display width, not len(), or CJK columns drift.
+        text = (
+            "| 項目 | 叔鼠 | 寶寶 |\n|---|---|---|\n"
+            "| 稱呼 | 叔鼠、Sam Liu | 玄兒 |\n"
+            "| 人格特質 | 策略、效率 | INFJ |"
+        )
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        lines = _code_block_lines(out)
+
+        def pipe_cols(line):
+            # Display-column index of each '|' (W/F chars count as 2).
+            cols, acc = [], 0
+            for ch in line:
+                if ch == "|":
+                    cols.append(acc)
+                acc += 2 if _east_asian_wide(ch) else 1
+            return tuple(cols)
+
+        positions = {pipe_cols(ln) for ln in lines}
+        assert len(positions) == 1  # every row's pipes align by display width
+        assert next(iter(positions))  # and there is at least one pipe column
+
+    def test_display_width_counts_cjk_as_two(self):
+        assert DiscordAdapter._display_width("項目") == 4
+        assert DiscordAdapter._display_width("abc") == 3
+        assert DiscordAdapter._display_width("A項") == 3
 
     def test_no_pipes_returns_unchanged_identity(self):
         text = "just a normal sentence"
