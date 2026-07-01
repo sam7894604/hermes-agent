@@ -381,17 +381,26 @@ async def test_send_file_attachment_forum_uses_files_kwarg(tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Markdown table → embed conversion
+# Markdown table → aligned monospace code block
 # ---------------------------------------------------------------------------
 
 
-def _field_calls(embed):
-    """Return [(name, value, inline), ...] recorded via embed.add_field()."""
-    return [(f["name"], f["value"], f["inline"]) for f in embed.fields]
+def _code_block_lines(text):
+    """Return the lines inside the first ``` fenced block in *text*."""
+    assert "```" in text
+    inner = text.split("```")[1]
+    return [ln for ln in inner.split("\n") if ln != ""]
 
 
-class TestConvertTablesToEmbeds:
-    def test_basic_table_extracted_and_text_preserved(self):
+class TestConvertTablesToCodeBlocks:
+    def test_tiny_table_exact_alignment(self):
+        # Widths: col0=1 ("A"/"1"), col1=2 ("B"/"22"). Pipes must line up.
+        text = "| A | B |\n|---|---|\n| 1 | 22 |"
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == (
+            "```\nA | B\n--|---\n1 | 22\n```"
+        )
+
+    def test_table_wrapped_inline_and_columns_aligned(self):
         text = (
             "Here is the data:\n\n"
             "| Name | Age | City |\n"
@@ -400,21 +409,16 @@ class TestConvertTablesToEmbeds:
             "| Bob | 25 | LA |\n\n"
             "Done."
         )
-        cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        assert cleaned == "Here is the data:\n\nDone."
-        assert len(embeds) == 1
-        assert _field_calls(embeds[0]) == [
-            ("Name", "Alice\nBob", True),
-            ("Age", "30\n25", True),
-            ("City", "NYC\nLA", True),
-        ]
-
-    def test_table_only_message_becomes_empty(self):
-        text = "| X | Y |\n| --- | --- |\n| 1 | 2 |"
-        cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        assert cleaned == ""
-        assert len(embeds) == 1
-        assert _field_calls(embeds[0]) == [("X", "1", True), ("Y", "2", True)]
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        # Prose kept inline around the block (not detached).
+        assert out.startswith("Here is the data:\n\n```\n")
+        assert out.endswith("\n```\n\nDone.")
+        assert "Alice" in out and "Bob" in out
+        # Every line inside the block has its pipes at identical columns.
+        lines = _code_block_lines(out)
+        pipe_cols = [tuple(i for i, ch in enumerate(ln) if ch == "|") for ln in lines]
+        assert len(set(pipe_cols)) == 1
+        assert pipe_cols[0]  # at least one pipe column
 
     def test_table_inside_code_fence_is_preserved(self):
         text = (
@@ -422,63 +426,56 @@ class TestConvertTablesToEmbeds:
             "| not | a | table |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n"
             "```\nafter."
         )
-        cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        assert embeds == []
-        assert cleaned == text  # unchanged — no tables outside fences
+        # Already fenced → untouched.
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == text
 
     def test_pipes_in_prose_are_not_converted(self):
         text = "Pipe the | output | here.\nAnd another | one."
-        cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        assert embeds == []
-        assert cleaned == text
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == text
 
     def test_ragged_rows_padded_and_truncated(self):
         text = (
             "| a | b | c |\n|---|---|---|\n"
-            "| 1 | 2 |\n"          # short row → padded with ZWSP
+            "| 1 | 2 |\n"          # short row → padded
             "| 3 | 4 | 5 | 6 |"    # long row → extra cell dropped
         )
-        _cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        zwsp = DiscordAdapter._TABLE_ZWSP
-        assert _field_calls(embeds[0]) == [
-            ("a", "1\n3", True),
-            ("b", "2\n4", True),
-            ("c", f"{zwsp}\n5", True),
-        ]
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        lines = _code_block_lines(out)
+        # Header + separator + 2 data rows, 3 columns each (2 pipes/line).
+        assert len(lines) == 4
+        assert all(ln.count("|") == 2 for ln in lines)
+        assert "6" not in out  # 4th cell of the long row was dropped
 
-    def test_two_tables_produce_two_embeds(self):
+    def test_two_tables_both_wrapped_with_prose_between(self):
         text = (
             "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
             "middle\n\n"
             "| C | D |\n|---|---|\n| 9 | 8 |"
         )
-        cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        assert cleaned == "middle"
-        assert len(embeds) == 2
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        assert out.count("```") == 4  # two fenced blocks (open+close each)
+        assert "\n\nmiddle\n\n" in out
 
-    def test_long_value_truncated_to_field_cap(self):
-        rows = "\n".join(f"| {'z' * 60} | b |" for _ in range(40))
-        text = f"| H1 | H2 |\n|---|---|\n{rows}"
-        _cleaned, embeds = DiscordAdapter._convert_tables_to_embeds(text)
-        name, value, _ = _field_calls(embeds[0])[0]
-        assert len(value) == 1024
-        assert value.endswith("…")
-
-    def test_no_pipes_returns_unchanged(self):
+    def test_no_pipes_returns_unchanged_identity(self):
         text = "just a normal sentence"
-        assert DiscordAdapter._convert_tables_to_embeds(text) == (text, [])
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) is text
+
+    def test_format_message_wraps_tables(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+        out = adapter.format_message("| A | B |\n|---|---|\n| 1 | 2 |")
+        assert out.startswith("```\n") and out.endswith("\n```")
 
 
 @pytest.mark.asyncio
-async def test_send_emits_table_embed_before_stripped_text():
-    """A message with a table posts the embed first, then the prose with the
-    table removed."""
+async def test_send_wraps_table_in_code_block_inline():
+    """A message with a table is sent as a single inline message whose table
+    is wrapped in an aligned code block — no separate embed message."""
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
 
     sent = []
 
-    async def fake_send(*, content=None, embed=None, reference=None):
-        sent.append({"content": content, "embed": embed})
+    async def fake_send(*, content=None, reference=None):
+        sent.append(content)
         return SimpleNamespace(id=len(sent))
 
     channel = SimpleNamespace(
@@ -490,41 +487,9 @@ async def test_send_emits_table_embed_before_stripped_text():
         fetch_channel=AsyncMock(),
     )
 
-    body = "intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\noutro"
+    body = "intro\n\n| A | B |\n|---|---|\n| 1 | 22 |\n\noutro"
     result = await adapter.send("123", body)
 
     assert result.success is True
-    # First send is the embed (no content), second is the stripped prose.
-    assert sent[0]["embed"] is not None and sent[0]["content"] is None
-    assert sent[1]["content"] == "intro\n\noutro"
-    assert sent[1]["embed"] is None
-
-
-@pytest.mark.asyncio
-async def test_send_table_only_message_does_not_send_empty_content():
-    """A message that is nothing but a table sends only the embed — never an
-    empty text message (which Discord rejects)."""
-    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
-
-    sent = []
-
-    async def fake_send(*, content=None, embed=None, reference=None):
-        sent.append({"content": content, "embed": embed})
-        return SimpleNamespace(id=len(sent))
-
-    channel = SimpleNamespace(
-        send=AsyncMock(side_effect=fake_send),
-        fetch_message=AsyncMock(),
-    )
-    adapter._client = SimpleNamespace(
-        get_channel=lambda _chat_id: channel,
-        fetch_channel=AsyncMock(),
-    )
-
-    result = await adapter.send("123", "| X | Y |\n|---|---|\n| 1 | 2 |")
-
-    assert result.success is True
-    assert len(sent) == 1  # embed only
-    assert sent[0]["embed"] is not None
-    # The embed's message id is reported as the primary message_id.
-    assert result.message_id == "1"
+    assert len(sent) == 1  # single inline message, no detached embed
+    assert sent[0] == "intro\n\n```\nA | B\n--|---\n1 | 22\n```\n\noutro"
