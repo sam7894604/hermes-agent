@@ -3475,13 +3475,39 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Format and split message if needed
             formatted = self.format_message(content)
+
+            # Auto-convert markdown tables → inline embed fields. Discord does
+            # not render markdown tables, so they arrive as walls of raw pipes;
+            # each table is lifted into a discord.Embed sent ahead of the
+            # surrounding prose, then stripped from the message body.
+            cleaned, table_embeds = self._convert_tables_to_embeds(formatted)
+            embed_message_ids: List[str] = []
+            for embed in table_embeds:
+                try:
+                    em = await channel.send(embed=embed)
+                    em_id = getattr(em, "id", None)
+                    if em_id is not None:
+                        embed_message_ids.append(str(em_id))
+                    await asyncio.sleep(0.05)  # preserve ordering under rate limits
+                except Exception as e:
+                    logger.warning("[%s] Failed to send table embed: %s", self.name, e)
+            if table_embeds:
+                formatted = cleaned
+
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
 
-            message_ids = []
+            # Seed with the table-embed message IDs so a table-only message
+            # (whose text body is now empty) still reports a real message_id.
+            message_ids = list(embed_message_ids)
             # Build the reference from ids — no fetch_message round trip.
             reference = self._reply_reference_for_send(reply_to, channel)
 
             for i, chunk in enumerate(chunks):
+                # Skip empty/whitespace-only chunks — Discord rejects empty
+                # content. This happens when a message was nothing but a table
+                # (now sent as an embed above, leaving an empty text body).
+                if not chunk.strip():
+                    continue
                 if self._reply_to_mode == "all":
                     chunk_reference = reference
                 else:  # "first" (default) or "off"
@@ -5866,6 +5892,138 @@ class DiscordAdapter(BasePlatformAdapter):
             os.environ["DISCORD_ALLOWED_USERS"] = ",".join(sorted(numeric_ids))
         if resolved_count:
             print(f"[{self.name}] Updated DISCORD_ALLOWED_USERS with {resolved_count} resolved ID(s)")
+
+    # ------------------------------------------------------------------
+    # Markdown table → embed conversion
+    #
+    # Discord does not render GitHub-flavored markdown tables — they arrive
+    # as walls of raw ``|`` pipes. We lift each table out of the message body
+    # into a ``discord.Embed`` (one inline field per column, values stacked by
+    # row) so it renders as an aligned grid instead.
+    # ------------------------------------------------------------------
+    _TABLE_SEP_CELL_RE = re.compile(r":?-+:?")
+    _TABLE_ZWSP = "​"  # zero-width space — placeholder for empty cells
+
+    @staticmethod
+    def _looks_like_table_row(line: str) -> bool:
+        """A candidate table/header/data row contains at least one pipe."""
+        return "|" in line
+
+    @classmethod
+    def _looks_like_separator_row(cls, line: str) -> bool:
+        """True for a markdown separator row like ``|---|:--:|``.
+
+        Every cell must consist solely of hyphens with optional leading/
+        trailing colons (``:?-+:?``). This is the distinctive signal that a
+        preceding pipe-bearing line is really a table header rather than a
+        sentence that happens to contain a pipe.
+        """
+        s = line.strip()
+        if not s or "-" not in s:
+            return False
+        cells = s.strip("|").split("|")
+        return all(cls._TABLE_SEP_CELL_RE.fullmatch(c.strip()) for c in cells) and bool(cells)
+
+    @classmethod
+    def _build_table_embed(cls, header_line: str, data_lines: list) -> Optional[Any]:
+        """Build a ``discord.Embed`` from a header row and its data rows.
+
+        Returns ``None`` when there is nothing useful to render (no columns or
+        no data rows). Rows are padded/truncated to the header's column count;
+        empty cells become a zero-width space (Discord rejects empty field
+        values). Field values over 1024 chars are truncated with an ellipsis.
+        """
+        headers = [h.strip() for h in header_line.strip().strip("|").split("|")]
+        ncols = len(headers)
+        if ncols == 0:
+            return None
+        # Discord caps an embed at 25 fields; a table wider than that is
+        # pathological — clamp so the API doesn't reject the whole embed.
+        if ncols > 25:
+            headers = headers[:25]
+            ncols = 25
+
+        rows = []
+        for line in data_lines:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < ncols:
+                cells += [""] * (ncols - len(cells))
+            elif len(cells) > ncols:
+                cells = cells[:ncols]
+            rows.append(cells)
+        if not rows:
+            return None
+
+        zwsp = cls._TABLE_ZWSP
+        embed = discord.Embed(color=discord.Color.blue())
+        for ci in range(ncols):
+            name = (headers[ci] or zwsp)[:256]  # Discord field-name cap
+            vals = "\n".join((row[ci] or zwsp) for row in rows)
+            if len(vals) > 1024:  # Discord field-value cap
+                vals = vals[:1023] + "…"
+            embed.add_field(name=name, value=vals or zwsp, inline=True)
+        return embed
+
+    @classmethod
+    def _extract_tables_from_text(cls, text: str) -> Tuple[str, list]:
+        """Pull markdown tables out of *text* (already known to be outside any
+        code fence). Returns (text_without_tables, [embeds])."""
+        lines = text.split("\n")
+        n = len(lines)
+        embeds: list = []
+        out: List[str] = []
+        i = 0
+        while i < n:
+            if (
+                i + 1 < n
+                and cls._looks_like_table_row(lines[i])
+                and cls._looks_like_separator_row(lines[i + 1])
+            ):
+                header = lines[i]
+                j = i + 2
+                data: List[str] = []
+                while j < n and cls._looks_like_table_row(lines[j]):
+                    data.append(lines[j])
+                    j += 1
+                embed = cls._build_table_embed(header, data)
+                if embed is not None:
+                    embeds.append(embed)
+                    i = j  # drop the header, separator, and data lines
+                    continue
+            out.append(lines[i])
+            i += 1
+        return "\n".join(out), embeds
+
+    @classmethod
+    def _convert_tables_to_embeds(cls, content: str) -> Tuple[str, list]:
+        """Scan *content* for markdown tables outside code blocks and convert
+        each into a ``discord.Embed`` with one inline field per column.
+
+        Tables inside triple-backtick fences are preserved verbatim. Returns
+        ``(cleaned_text, embeds)``; when no tables are found the original
+        content is returned unchanged with an empty embed list.
+        """
+        if not DISCORD_AVAILABLE or not content or "|" not in content:
+            return content, []
+
+        FENCE = "```"
+        segments = content.split(FENCE)
+        embeds: list = []
+        parts: List[str] = []
+        for idx, seg in enumerate(segments):
+            if idx % 2 == 1:  # inside a fenced code block → keep verbatim
+                parts.append(f"{FENCE}{seg}{FENCE}")
+                continue
+            cleaned_seg, seg_embeds = cls._extract_tables_from_text(seg)
+            parts.append(cleaned_seg)
+            embeds.extend(seg_embeds)
+
+        if not embeds:
+            return content, []
+
+        cleaned = "".join(parts)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, embeds
 
     def format_message(self, content: str) -> str:
         """Format message for Discord.
