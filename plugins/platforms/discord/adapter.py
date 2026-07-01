@@ -5675,29 +5675,95 @@ class DiscordAdapter(BasePlatformAdapter):
 
         return parts or [{"type": "text", "text": content}]
 
+    @staticmethod
+    def _hermes_fonts_dir() -> str:
+        """Drop-in font directory: put any open-source .ttf/.otf/.ttc here and
+        table rendering picks it up (no packaging needed)."""
+        base = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        return os.path.join(base, "fonts")
+
+    @classmethod
+    def _discover_dropped_in_font(cls, size: int, _try):
+        """Load a font from the drop-in dir (``$HERMES_HOME/fonts``). Any font
+        file there is used; a ``*bold*`` file is paired as the bold face when
+        present. Returns a ``(regular, bold)`` tuple or ``None``."""
+        fdir = cls._hermes_fonts_dir()
+        if not os.path.isdir(fdir):
+            return None
+        try:
+            files = sorted(
+                os.path.join(fdir, f)
+                for f in os.listdir(fdir)
+                if f.lower().endswith((".ttf", ".otf", ".ttc", ".otc"))
+            )
+        except Exception:
+            return None
+        if not files:
+            return None
+
+        def _is_bold(p: str) -> bool:
+            return "bold" in os.path.basename(p).lower()
+
+        def _is_styled(p: str) -> bool:
+            n = os.path.basename(p).lower()
+            return any(w in n for w in ("bold", "italic", "oblique"))
+
+        reg = next((f for f in files if not _is_styled(f)), files[0])
+        bold = next((f for f in files if _is_bold(f)), reg)
+        return _try(reg, bold)
+
     @classmethod
     def _load_table_fonts(cls, size: int):
         """Return ``(regular, bold)`` PIL fonts for table rendering, or
         ``(None, None)`` if Pillow or a suitable font is unavailable. Cached
-        per size."""
+        per size.
+
+        Resolution order: ``HERMES_TABLE_FONT`` env override → curated system
+        paths (Noto CJK / JhengHei / PingFang) → any font dropped into
+        ``$HERMES_HOME/fonts``. All are open-source-font friendly and never
+        require bundling a large CJK font in the package.
+        """
         if size in cls._table_font_cache:
             return cls._table_font_cache[size]
         result = (None, None)
         try:
             from PIL import ImageFont
-            for reg, bold in cls._TABLE_FONT_CANDIDATES:
-                try:
-                    font = ImageFont.truetype(reg, size)
-                except Exception:
-                    continue
-                try:
-                    font_b = ImageFont.truetype(bold, size)
-                except Exception:
-                    font_b = font
-                result = (font, font_b)
-                break
         except Exception:
-            result = (None, None)
+            cls._table_font_cache[size] = result
+            return result
+
+        def _try(reg, bold):
+            try:
+                font = ImageFont.truetype(reg, size)
+            except Exception:
+                return None
+            try:
+                font_b = ImageFont.truetype(bold, size) if bold else font
+            except Exception:
+                font_b = font
+            return (font, font_b)
+
+        # 1. Explicit override — point at any open-source font directly.
+        env_reg = os.environ.get("HERMES_TABLE_FONT")
+        if env_reg:
+            got = _try(env_reg, os.environ.get("HERMES_TABLE_FONT_BOLD") or env_reg)
+            if got:
+                result = got
+
+        # 2. Curated known system CJK fonts.
+        if result == (None, None):
+            for reg, bold in cls._TABLE_FONT_CANDIDATES:
+                got = _try(reg, bold)
+                if got:
+                    result = got
+                    break
+
+        # 3. Drop-in dir ($HERMES_HOME/fonts) — install a font by placing it there.
+        if result == (None, None):
+            got = cls._discover_dropped_in_font(size, _try)
+            if got:
+                result = got
+
         cls._table_font_cache[size] = result
         return result
 

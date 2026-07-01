@@ -646,3 +646,42 @@ def test_render_table_image_produces_png_when_font_available():
         assert png is None
     else:
         assert png is not None and png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+class TestTableFontResolution:
+    def setup_method(self):
+        DiscordAdapter._table_font_cache.clear()
+
+    def teardown_method(self):
+        DiscordAdapter._table_font_cache.clear()
+
+    def test_hermes_fonts_dir_honors_home_env(self, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", "/tmp/hx")
+        assert DiscordAdapter._hermes_fonts_dir().replace("\\", "/") == "/tmp/hx/fonts"
+
+    def test_dropin_dir_selects_regular_and_bold(self, monkeypatch, tmp_path):
+        fonts = tmp_path / "fonts"
+        fonts.mkdir()
+        (fonts / "MyFont-Regular.otf").write_bytes(b"x")
+        (fonts / "MyFont-Bold.otf").write_bytes(b"x")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        picked = {}
+
+        def _fake_try(reg, bold):
+            picked["reg"], picked["bold"] = reg, bold
+            return ("REG", "BOLD")
+
+        got = DiscordAdapter._discover_dropped_in_font(20, _fake_try)
+        assert got == ("REG", "BOLD")
+        assert picked["reg"].endswith("MyFont-Regular.otf")
+        assert picked["bold"].endswith("MyFont-Bold.otf")
+
+    def test_dropin_dir_absent_returns_none(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # no fonts/ subdir
+        assert DiscordAdapter._discover_dropped_in_font(20, lambda r, b: ("x", "y")) is None
+
+    def test_env_override_missing_font_falls_through_gracefully(self, monkeypatch):
+        monkeypatch.setenv("HERMES_TABLE_FONT", "/no/such/font.ttf")
+        result = DiscordAdapter._load_table_fonts(97)  # unusual size → not cached
+        assert isinstance(result, tuple) and len(result) == 2
