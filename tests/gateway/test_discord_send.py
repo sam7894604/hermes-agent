@@ -528,6 +528,41 @@ class TestInlineMarkdown:
         assert DiscordAdapter._strip_inline_md("**¥0.04**") == "¥0.04"
         assert DiscordAdapter._strip_inline_md("plain") == "plain"
 
+
+class TestEmoji:
+    def test_is_emoji_char(self):
+        assert DiscordAdapter._is_emoji_char("✅")  # U+2705
+        assert DiscordAdapter._is_emoji_char("🔥")  # U+1F525
+        assert DiscordAdapter._is_emoji_char("⭐")  # U+2B50
+        assert not DiscordAdapter._is_emoji_char("a")
+        assert not DiscordAdapter._is_emoji_char("中")
+
+    def test_split_emoji_runs_basic(self):
+        assert DiscordAdapter._split_emoji_runs("a✅b") == [
+            ("a", False),
+            ("✅", True),
+            ("b", False),
+        ]
+
+    def test_split_emoji_runs_groups_adjacent_and_modifiers(self):
+        # Adjacent emoji group together; skin-tone modifier stays attached.
+        assert DiscordAdapter._split_emoji_runs("✅🔥") == [("✅🔥", True)]
+        assert DiscordAdapter._split_emoji_runs("👍🏻") == [("👍🏻", True)]
+
+    def test_split_emoji_runs_plain_text(self):
+        assert DiscordAdapter._split_emoji_runs("hello 中文") == [("hello 中文", False)]
+
+    def test_emoji_font_path_finds_dropin(self, monkeypatch, tmp_path):
+        fonts = tmp_path / "fonts"
+        fonts.mkdir()
+        (fonts / "NotoColorEmoji.ttf").write_bytes(b"x")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_EMOJI_FONT", raising=False)
+        # Force past system candidates (which won't exist under tmp anyway).
+        monkeypatch.setattr(DiscordAdapter, "_EMOJI_FONT_CANDIDATES", [])
+        path = DiscordAdapter._emoji_font_path()
+        assert path is not None and path.endswith("NotoColorEmoji.ttf")
+
     def test_no_pipes_returns_unchanged_identity(self):
         text = "just a normal sentence"
         assert DiscordAdapter._convert_tables_to_code_blocks(text) is text
