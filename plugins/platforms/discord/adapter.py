@@ -6163,6 +6163,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 os.path.join(fdir, f)
                 for f in os.listdir(fdir)
                 if f.lower().endswith((".ttf", ".otf", ".ttc", ".otc"))
+                and "emoji" not in f.lower()  # emoji fonts are resolved separately
             )
         except Exception:
             return None
@@ -6235,6 +6236,105 @@ class DiscordAdapter(BasePlatformAdapter):
         cls._table_font_cache[size] = result
         return result
 
+    # ------------------------------------------------------------------
+    # Emoji rendering
+    #
+    # Emoji live in a dedicated emoji font, not Noto Sans CJK, so a cell like
+    # "Done ✅" needs per-run font fallback. Color emoji fonts (e.g. Noto Color
+    # Emoji, CBDT) only load at a fixed bitmap strike, so we render at the
+    # strike and resize to the text line height, then alpha-paste.
+    # ------------------------------------------------------------------
+    _EMOJI_FONT_CANDIDATES = [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+        "C:/Windows/Fonts/seguiemj.ttf",
+    ]
+    _EMOJI_STRIKE_SIZES = (109, 128, 136, 96, 72, 64, 32)
+    _emoji_font_cache: dict = {}
+
+    @classmethod
+    def _emoji_font_path(cls) -> Optional[str]:
+        """Resolve an emoji font: ``HERMES_EMOJI_FONT`` env → known system
+        paths → an ``*emoji*`` file in the drop-in dir ($HERMES_HOME/fonts)."""
+        env = os.environ.get("HERMES_EMOJI_FONT")
+        if env and os.path.exists(env):
+            return env
+        for c in cls._EMOJI_FONT_CANDIDATES:
+            if os.path.exists(c):
+                return c
+        fdir = cls._hermes_fonts_dir()
+        if os.path.isdir(fdir):
+            try:
+                for f in sorted(os.listdir(fdir)):
+                    low = f.lower()
+                    if "emoji" in low and low.endswith((".ttf", ".otf", ".ttc")):
+                        return os.path.join(fdir, f)
+            except Exception:
+                pass
+        return None
+
+    @classmethod
+    def _load_emoji_font(cls):
+        """Return a PIL emoji font (loaded at its bitmap strike), or ``None``.
+        Cached."""
+        if "f" in cls._emoji_font_cache:
+            return cls._emoji_font_cache["f"]
+        font = None
+        try:
+            from PIL import ImageFont
+            path = cls._emoji_font_path()
+            if path:
+                for sz in cls._EMOJI_STRIKE_SIZES:
+                    try:
+                        font = ImageFont.truetype(path, sz)
+                        break
+                    except Exception:
+                        continue
+        except Exception:
+            font = None
+        cls._emoji_font_cache["f"] = font
+        return font
+
+    @staticmethod
+    def _is_emoji_char(ch: str) -> bool:
+        o = ord(ch)
+        return (
+            0x1F300 <= o <= 0x1FAFF   # pictographs, emoticons, transport, symbols
+            or 0x1F1E6 <= o <= 0x1F1FF  # regional indicators (flags)
+            or 0x2600 <= o <= 0x27BF    # misc symbols + dingbats (✅ ✨ ❌ …)
+            or 0x2B00 <= o <= 0x2BFF    # stars/arrows (⭐ …)
+            or o in (0x203C, 0x2049, 0x2122, 0x2139)
+        )
+
+    @staticmethod
+    def _is_emoji_mod(ch: str) -> bool:
+        """Zero-width joiner / variation selector / skin-tone / keycap — glued
+        onto the current emoji cluster."""
+        o = ord(ch)
+        return o in (0x200D, 0xFE0F, 0xFE0E, 0x20E3) or 0x1F3FB <= o <= 0x1F3FF
+
+    @classmethod
+    def _split_emoji_runs(cls, text: str) -> list:
+        """Split *text* into ``[(segment, is_emoji), ...]`` runs so emoji
+        segments can be drawn with the emoji font. ZWJ sequences, variation
+        selectors and skin-tone modifiers stay attached to their emoji."""
+        segs: list = []
+        cur: List[str] = []
+        cur_emoji = None
+        for ch in text:
+            kind = bool(cls._is_emoji_char(ch) or (cls._is_emoji_mod(ch) and cur_emoji))
+            if cur and cur_emoji == kind:
+                cur.append(ch)
+            else:
+                if cur:
+                    segs.append(("".join(cur), cur_emoji))
+                cur, cur_emoji = [ch], kind
+        if cur:
+            segs.append(("".join(cur), cur_emoji))
+        return segs
+
     @classmethod
     def _render_table_image(cls, header_line: str, data_lines: list) -> Optional[bytes]:
         """Render a markdown table to PNG bytes (deterministic — Pillow only,
@@ -6265,6 +6365,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 rows.append([cls._parse_inline_md(c) for c in cells])
 
             measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+            ascent, descent = font.getmetrics()
 
             def _font(flags, header: bool):
                 # Header cells are bold; body cells bold only for **bold** runs.
@@ -6272,11 +6373,59 @@ class DiscordAdapter(BasePlatformAdapter):
                 # the glyphs — the markers are simply stripped.)
                 return font_b if (header or "b" in flags) else font
 
+            # Emoji: render each emoji segment with the emoji font at its bitmap
+            # strike, then resize to the text height and alpha-paste. Cached per
+            # segment for this render.
+            emoji_font = cls._load_emoji_font()
+            emoji_h = ascent
+            ecache: dict = {}
+
+            def _emoji_im(seg: str):
+                if emoji_font is None:
+                    return None
+                if seg in ecache:
+                    return ecache[seg]
+                im = None
+                try:
+                    strike = getattr(emoji_font, "size", 109) or 109
+                    canvas = Image.new(
+                        "RGBA", (strike * (len(seg) + 2), strike + 60), (0, 0, 0, 0)
+                    )
+                    ImageDraw.Draw(canvas).text(
+                        (0, 0), seg, font=emoji_font, embedded_color=True
+                    )
+                    bbox = canvas.getbbox()
+                    if bbox:
+                        crop = canvas.crop(bbox)
+                        scale = emoji_h / crop.height
+                        im = crop.resize(
+                            (max(1, int(crop.width * scale)), emoji_h), Image.LANCZOS
+                        )
+                except Exception:
+                    im = None
+                ecache[seg] = im
+                return im
+
+            def _subruns(runs):
+                # → [(segment, flags, emoji_image_or_None)].
+                out = []
+                for t, fl in runs:
+                    if not t:
+                        continue
+                    if emoji_font is None:
+                        out.append((t, fl, None))
+                        continue
+                    for seg, is_e in cls._split_emoji_runs(t):
+                        out.append((seg, fl, _emoji_im(seg) if is_e else None))
+                return out
+
             def _runs_width(runs, header: bool) -> int:
-                return sum(
-                    int(measure.textlength(t, font=_font(fl, header)))
-                    for t, fl in runs if t
-                )
+                w = 0
+                for seg, fl, em in _subruns(runs):
+                    w += em.width if em is not None else int(
+                        measure.textlength(seg, font=_font(fl, header))
+                    )
+                return w
 
             padx, pady = cls._TABLE_IMG_PAD_X, cls._TABLE_IMG_PAD_Y
             col_w = []
@@ -6286,7 +6435,6 @@ class DiscordAdapter(BasePlatformAdapter):
                     w = max(w, _runs_width(r[c], False))
                 col_w.append(w + 2 * padx)
 
-            ascent, descent = font.getmetrics()
             row_h = ascent + descent + 2 * pady
             width = sum(col_w) + 1
             height = row_h * (len(rows) + 1) + 1
@@ -6309,12 +6457,15 @@ class DiscordAdapter(BasePlatformAdapter):
             def _draw_cell(ci: int, ri: int, runs, header: bool, color) -> None:
                 x = xs[ci] + padx
                 y = ri * row_h + pady
-                for t, fl in runs:
-                    if not t:
+                for seg, fl, em in _subruns(runs):
+                    if em is not None:  # emoji image
+                        ey = ri * row_h + pady + (ascent - em.height) // 2
+                        img.paste(em, (x, ey), em)
+                        x += em.width
                         continue
                     f = _font(fl, header)
-                    dr.text((x, y), t, font=f, fill=color)
-                    w = int(measure.textlength(t, font=f))
+                    dr.text((x, y), seg, font=f, fill=color)
+                    w = int(measure.textlength(seg, font=f))
                     if "s" in fl:  # strikethrough
                         yy = ri * row_h + strike_y
                         dr.line([(x, yy), (x + w, yy)], fill=color, width=2)
