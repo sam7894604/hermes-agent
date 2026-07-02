@@ -445,3 +445,365 @@ async def test_typing_stop_cleans_up():
 
     await adapter.stop_typing("12345")
     assert "12345" not in adapter._typing_tasks
+
+
+# ---------------------------------------------------------------------------
+# Markdown table → aligned monospace code block
+# ---------------------------------------------------------------------------
+
+
+def _code_block_lines(text):
+    """Return the lines inside the first ``` fenced block in *text*."""
+    assert "```" in text
+    inner = text.split("```")[1]
+    return [ln for ln in inner.split("\n") if ln != ""]
+
+
+def _east_asian_wide(ch):
+    import unicodedata
+    return unicodedata.east_asian_width(ch) in ("W", "F")
+
+
+class TestConvertTablesToCodeBlocks:
+    def test_tiny_table_exact_alignment(self):
+        # Widths: col0=1 ("A"/"1"), col1=2 ("B"/"22"). Pipes must line up.
+        text = "| A | B |\n|---|---|\n| 1 | 22 |"
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == (
+            "```\nA | B\n--|---\n1 | 22\n```"
+        )
+
+    def test_table_wrapped_inline_and_columns_aligned(self):
+        text = (
+            "Here is the data:\n\n"
+            "| Name | Age | City |\n"
+            "|------|-----|------|\n"
+            "| Alice | 30 | NYC |\n"
+            "| Bob | 25 | LA |\n\n"
+            "Done."
+        )
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        # Prose kept inline around the block (not detached).
+        assert out.startswith("Here is the data:\n\n```\n")
+        assert out.endswith("\n```\n\nDone.")
+        assert "Alice" in out and "Bob" in out
+        # Every line inside the block has its pipes at identical columns.
+        lines = _code_block_lines(out)
+        pipe_cols = [tuple(i for i, ch in enumerate(ln) if ch == "|") for ln in lines]
+        assert len(set(pipe_cols)) == 1
+        assert pipe_cols[0]  # at least one pipe column
+
+    def test_table_inside_code_fence_is_preserved(self):
+        text = (
+            "Look:\n```\n"
+            "| not | a | table |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n"
+            "```\nafter."
+        )
+        # Already fenced → untouched.
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == text
+
+    def test_pipes_in_prose_are_not_converted(self):
+        text = "Pipe the | output | here.\nAnd another | one."
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) == text
+
+    def test_ragged_rows_padded_and_truncated(self):
+        text = (
+            "| a | b | c |\n|---|---|---|\n"
+            "| 1 | 2 |\n"          # short row → padded
+            "| 3 | 4 | 5 | 6 |"    # long row → extra cell dropped
+        )
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        lines = _code_block_lines(out)
+        # Header + separator + 2 data rows, 3 columns each (2 pipes/line).
+        assert len(lines) == 4
+        assert all(ln.count("|") == 2 for ln in lines)
+        assert "6" not in out  # 4th cell of the long row was dropped
+
+    def test_two_tables_both_wrapped_with_prose_between(self):
+        text = (
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\n"
+            "middle\n\n"
+            "| C | D |\n|---|---|\n| 9 | 8 |"
+        )
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        assert out.count("```") == 4  # two fenced blocks (open+close each)
+        assert "\n\nmiddle\n\n" in out
+
+    def test_cjk_columns_align_by_display_width(self):
+        # CJK glyphs render 2 cells wide in Discord's monospace font. Padding
+        # must use display width, not len(), or CJK columns drift.
+        text = (
+            "| 項目 | 叔鼠 | 寶寶 |\n|---|---|---|\n"
+            "| 稱呼 | 叔鼠、Sam Liu | 玄兒 |\n"
+            "| 人格特質 | 策略、效率 | INFJ |"
+        )
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        lines = _code_block_lines(out)
+
+        def pipe_cols(line):
+            # Display-column index of each '|' (W/F chars count as 2).
+            cols, acc = [], 0
+            for ch in line:
+                if ch == "|":
+                    cols.append(acc)
+                acc += 2 if _east_asian_wide(ch) else 1
+            return tuple(cols)
+
+        positions = {pipe_cols(ln) for ln in lines}
+        assert len(positions) == 1  # every row's pipes align by display width
+        assert next(iter(positions))  # and there is at least one pipe column
+
+    def test_display_width_counts_cjk_as_two(self):
+        assert DiscordAdapter._display_width("項目") == 4
+        assert DiscordAdapter._display_width("abc") == 3
+        assert DiscordAdapter._display_width("A項") == 3
+
+    def test_code_block_strips_markdown_markers(self):
+        # **bold** must not appear literally, and columns align on the
+        # visible ("¥0.04") text, not the marker-laden source.
+        text = "| a | b |\n|---|---|\n| x | **¥0.04** |"
+        out = DiscordAdapter._convert_tables_to_code_blocks(text)
+        assert "**" not in out
+        assert "¥0.04" in out
+
+
+class TestInlineMarkdown:
+    def test_bold_run(self):
+        assert DiscordAdapter._parse_inline_md("**hi**") == [("hi", frozenset({"b"}))]
+
+    def test_mixed_runs(self):
+        runs = DiscordAdapter._parse_inline_md("a **b** c")
+        assert runs == [
+            ("a ", frozenset()),
+            ("b", frozenset({"b"})),
+            (" c", frozenset()),
+        ]
+
+    def test_bold_italic_and_code_and_strike(self):
+        assert DiscordAdapter._parse_inline_md("***x***") == [("x", frozenset({"b", "i"}))]
+        assert DiscordAdapter._parse_inline_md("`c`") == [("c", frozenset({"c"}))]
+        assert DiscordAdapter._parse_inline_md("~~s~~") == [("s", frozenset({"s"}))]
+
+    def test_unmatched_marker_kept_literal(self):
+        assert DiscordAdapter._parse_inline_md("a * b") == [("a * b", frozenset())]
+
+    def test_strip_inline_md(self):
+        assert DiscordAdapter._strip_inline_md("**¥0.04**") == "¥0.04"
+        assert DiscordAdapter._strip_inline_md("plain") == "plain"
+
+
+class TestEmoji:
+    def test_is_emoji_char(self):
+        assert DiscordAdapter._is_emoji_char("✅")  # U+2705
+        assert DiscordAdapter._is_emoji_char("🔥")  # U+1F525
+        assert DiscordAdapter._is_emoji_char("⭐")  # U+2B50
+        assert not DiscordAdapter._is_emoji_char("a")
+        assert not DiscordAdapter._is_emoji_char("中")
+
+    def test_split_emoji_runs_basic(self):
+        assert DiscordAdapter._split_emoji_runs("a✅b") == [
+            ("a", False),
+            ("✅", True),
+            ("b", False),
+        ]
+
+    def test_split_emoji_runs_groups_adjacent_and_modifiers(self):
+        # Adjacent emoji group together; skin-tone modifier stays attached.
+        assert DiscordAdapter._split_emoji_runs("✅🔥") == [("✅🔥", True)]
+        assert DiscordAdapter._split_emoji_runs("👍🏻") == [("👍🏻", True)]
+
+    def test_split_emoji_runs_plain_text(self):
+        assert DiscordAdapter._split_emoji_runs("hello 中文") == [("hello 中文", False)]
+
+    def test_emoji_font_path_finds_dropin(self, monkeypatch, tmp_path):
+        fonts = tmp_path / "fonts"
+        fonts.mkdir()
+        (fonts / "NotoColorEmoji.ttf").write_bytes(b"x")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("HERMES_EMOJI_FONT", raising=False)
+        # Force past system candidates (which won't exist under tmp anyway).
+        monkeypatch.setattr(DiscordAdapter, "_EMOJI_FONT_CANDIDATES", [])
+        path = DiscordAdapter._emoji_font_path()
+        assert path is not None and path.endswith("NotoColorEmoji.ttf")
+
+    def test_no_pipes_returns_unchanged_identity(self):
+        text = "just a normal sentence"
+        assert DiscordAdapter._convert_tables_to_code_blocks(text) is text
+
+    def test_format_message_wraps_tables(self):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+        out = adapter.format_message("| A | B |\n|---|---|\n| 1 | 2 |")
+        assert out.startswith("```\n") and out.endswith("\n```")
+
+
+# ---------------------------------------------------------------------------
+# Message splitting (text / table parts) + inline table image
+# ---------------------------------------------------------------------------
+
+
+class TestSplitMessageParts:
+    def test_no_table_single_text_part(self):
+        assert DiscordAdapter._split_message_parts("hello world") == [
+            {"type": "text", "text": "hello world"}
+        ]
+
+    def test_table_between_prose_splits_in_order(self):
+        parts = DiscordAdapter._split_message_parts(
+            "intro\n| A | B |\n|---|---|\n| 1 | 2 |\nouttro"
+        )
+        assert [p["type"] for p in parts] == ["text", "table", "text"]
+        assert parts[0]["text"].strip() == "intro"
+        assert parts[1]["header"] == "| A | B |"
+        assert parts[1]["rows"] == ["| 1 | 2 |"]
+        assert parts[2]["text"].strip() == "outtro"
+
+    def test_fenced_pure_table_is_imaged(self):
+        # A fence whose whole body is just a table → treated as a table
+        # (the agent commonly wraps tables in ``` for display).
+        text = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["table"]
+        assert parts[0]["header"] == "| A | B |"
+
+    def test_fenced_pure_table_with_lang_tag_is_imaged(self):
+        text = "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["table"]
+
+    def test_fenced_real_code_stays_text(self):
+        # Code that merely contains a pipe (no |---| separator) stays verbatim.
+        text = "```python\ndef f(x):\n    return x | 1\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["text"]
+        assert "def f(x)" in parts[0]["text"]
+
+    def test_fenced_table_plus_other_lines_stays_text(self):
+        text = "```\n# a note\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["text"]
+
+    def test_pipes_in_prose_stay_text(self):
+        parts = DiscordAdapter._split_message_parts("use the | pipe | here")
+        assert [p["type"] for p in parts] == ["text"]
+
+    def test_two_tables(self):
+        parts = DiscordAdapter._split_message_parts(
+            "| A |\n|---|\n| 1 |\n\nmid\n\n| B |\n|---|\n| 2 |"
+        )
+        assert [p["type"] for p in parts] == ["table", "text", "table"]
+        assert parts[1]["text"].strip() == "mid"
+
+
+@pytest.mark.asyncio
+async def test_send_splits_table_into_inline_image(monkeypatch):
+    """A table renders to a PNG that is sent inline between the surrounding
+    prose: text-before → image → text-after, in order."""
+    monkeypatch.setattr(
+        DiscordAdapter, "_render_table_image", classmethod(lambda cls, h, d: b"PNGDATA")
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    sent = []
+
+    async def fake_send(*, content=None, file=None, reference=None):
+        sent.append({"content": content, "file": file})
+        return SimpleNamespace(id=len(sent))
+
+    channel = SimpleNamespace(
+        send=AsyncMock(side_effect=fake_send),
+        fetch_message=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    body = "intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nouttro"
+    result = await adapter.send("123", body)
+
+    assert result.success is True
+    assert len(sent) == 3
+    assert sent[0]["content"] == "intro" and sent[0]["file"] is None
+    assert sent[1]["file"] is not None and sent[1]["content"] is None  # the image
+    assert sent[2]["content"] == "outtro" and sent[2]["file"] is None
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_code_block_when_no_image(monkeypatch):
+    """When image rendering is unavailable, the table is sent inline as an
+    aligned code block in a single message (original behaviour)."""
+    monkeypatch.setattr(
+        DiscordAdapter, "_render_table_image", classmethod(lambda cls, h, d: None)
+    )
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    sent = []
+
+    async def fake_send(*, content=None, file=None, reference=None):
+        sent.append({"content": content, "file": file})
+        return SimpleNamespace(id=len(sent))
+
+    channel = SimpleNamespace(
+        send=AsyncMock(side_effect=fake_send),
+        fetch_message=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.send("123", "intro\n\n| A | B |\n|---|---|\n| 1 | 22 |\n\nouttro")
+
+    assert result.success is True
+    assert len(sent) == 1  # single inline message
+    assert sent[0]["file"] is None
+    assert sent[0]["content"] == "intro\n\n```\nA | B\n--|---\n1 | 22\n```\n\nouttro"
+
+
+def test_render_table_image_produces_png_when_font_available():
+    """If a CJK/Latin font is present, rendering yields real PNG bytes;
+    otherwise it returns None (and callers fall back to text)."""
+    font, _ = DiscordAdapter._load_table_fonts(DiscordAdapter._TABLE_IMG_FONT_SIZE)
+    png = DiscordAdapter._render_table_image("| 項目 | 值 |", ["| 稱呼 | 叔鼠 |"])
+    if font is None:
+        assert png is None
+    else:
+        assert png is not None and png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+class TestTableFontResolution:
+    def setup_method(self):
+        DiscordAdapter._table_font_cache.clear()
+
+    def teardown_method(self):
+        DiscordAdapter._table_font_cache.clear()
+
+    def test_hermes_fonts_dir_honors_home_env(self, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", "/tmp/hx")
+        assert DiscordAdapter._hermes_fonts_dir().replace("\\", "/") == "/tmp/hx/fonts"
+
+    def test_dropin_dir_selects_regular_and_bold(self, monkeypatch, tmp_path):
+        fonts = tmp_path / "fonts"
+        fonts.mkdir()
+        (fonts / "MyFont-Regular.otf").write_bytes(b"x")
+        (fonts / "MyFont-Bold.otf").write_bytes(b"x")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        picked = {}
+
+        def _fake_try(reg, bold):
+            picked["reg"], picked["bold"] = reg, bold
+            return ("REG", "BOLD")
+
+        got = DiscordAdapter._discover_dropped_in_font(20, _fake_try)
+        assert got == ("REG", "BOLD")
+        assert picked["reg"].endswith("MyFont-Regular.otf")
+        assert picked["bold"].endswith("MyFont-Bold.otf")
+
+    def test_dropin_dir_absent_returns_none(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))  # no fonts/ subdir
+        assert DiscordAdapter._discover_dropped_in_font(20, lambda r, b: ("x", "y")) is None
+
+    def test_env_override_missing_font_falls_through_gracefully(self, monkeypatch):
+        monkeypatch.setenv("HERMES_TABLE_FONT", "/no/such/font.ttf")
+        result = DiscordAdapter._load_table_fonts(97)  # unusual size → not cached
+        assert isinstance(result, tuple) and len(result) == 2

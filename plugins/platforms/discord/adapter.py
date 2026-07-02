@@ -11,6 +11,7 @@ Uses discord.py library for:
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -1935,9 +1937,10 @@ class DiscordAdapter(BasePlatformAdapter):
             if self._is_forum_parent(channel):
                 return await self._send_to_forum(channel, content)
 
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            # Build the ordered send items: text chunks and/or inline table
+            # images. Tables split the message in place (text → image → text).
+            outgoing = self._build_outgoing_items(content)
+            has_image = any("image" in item for item in outgoing)
 
             message_ids = []
             reference = None
@@ -1952,20 +1955,19 @@ class DiscordAdapter(BasePlatformAdapter):
                 except Exception as e:
                     logger.debug("Could not fetch reply-to message: %s", e)
 
-            for i, chunk in enumerate(chunks):
+            for i, item in enumerate(outgoing):
                 if self._reply_to_mode == "all":
-                    chunk_reference = reference
+                    item_reference = reference
                 else:  # "first" (default) or "off"
-                    chunk_reference = reference if i == 0 else None
+                    item_reference = reference if i == 0 else None
                 try:
                     msg = await channel.send(
-                        content=chunk,
-                        reference=chunk_reference,
+                        **self._discord_send_kwargs(item, item_reference)
                     )
                 except Exception as e:
                     err_text = str(e)
                     if (
-                        chunk_reference is not None
+                        item_reference is not None
                         and (
                             (
                                 "error code: 50035" in err_text
@@ -1981,12 +1983,15 @@ class DiscordAdapter(BasePlatformAdapter):
                         )
                         reference = None
                         msg = await channel.send(
-                            content=chunk,
-                            reference=None,
+                            **self._discord_send_kwargs(item, None)
                         )
                     else:
                         raise
                 message_ids.append(str(msg.id))
+                # Keep multi-message ordering stable when images are interleaved
+                # with text (Discord can reorder sends within the same tick).
+                if has_image and i < len(outgoing) - 1:
+                    await asyncio.sleep(0.05)
 
             # Track the last message we sent in this channel for history
             # backfill — avoids a full channel.history() scan on hot paths.
@@ -1997,6 +2002,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 elif not _looks_like_nonconversational_history_message(content):
                     self._last_self_message_id[_target_id] = message_ids[-1]
 
+            # Auto-detect choice prompts and append clickable buttons. Skipped
+            # for nonconversational/system messages (history backfill, status
+            # echoes) since those aren't questions to the user.
+            if message_ids and not nonconversational:
+                await self._maybe_send_choice_buttons(
+                    chat_id, content, reply_to, metadata,
+                )
+
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
@@ -2006,6 +2019,138 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
             return SendResult(success=False, error=str(e))
+
+    async def _maybe_send_choice_buttons(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        """Append clickable choice buttons when ``content`` poses a choice.
+
+        Parses the just-sent message for an explicit choice prefix — ``? `` for
+        a single-choice prompt or ``?? `` for a multi-select one — plus an
+        option list (numbered, circled, lettered, or bulleted). If 2+ options
+        are found, posts a small follow-up embed carrying an
+        :class:`AutoChoiceView`. The embed's description echoes the question
+        text (prefix stripped). Single-select injects the picked option
+        immediately; multi-select collects toggles until ``✅ Confirm`` injects
+        the joined answer.
+
+        Best-effort: any failure is swallowed (logged at debug) so a parsing
+        or send hiccup never breaks the primary message delivery.
+        """
+        if not self._discord_auto_choice_buttons():
+            return
+        if not self._client or not DISCORD_AVAILABLE:
+            return
+        try:
+            choices, multi_select = _detect_inline_choices(content)
+            if len(choices) < 2:
+                return
+
+            # Resolve the same target channel send() used (thread wins).
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+            if not channel:
+                return
+
+            view = AutoChoiceView(
+                adapter=self,
+                choices=choices,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+                multi_select=multi_select,
+            )
+            question = _extract_choice_question(content)
+            if multi_select:
+                title = "❓ Hermes asks (multi-select)"
+                hint = "Select any number, then ✅ Confirm — or ✏️ Other to type your own."
+            else:
+                title = "❓ Hermes asks"
+                hint = "Tap a choice below, or ✏️ Other to type your own."
+            description = f"{question}\n\n{hint}" if question else hint
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=discord.Color.blue(),
+            )
+            msg = await channel.send(embed=embed, view=view)
+            view._message = msg
+        except Exception as e:
+            logger.debug("[%s] auto-choice buttons skipped: %s", self.name, e)
+
+    async def _inject_user_choice(self, interaction: Any, choice_text: str) -> None:
+        """Feed a clicked choice back into the gateway as a fresh user turn.
+
+        Builds a :class:`MessageEvent` from the interaction's channel + the
+        clicking user — matching the session key a real message in that
+        channel/thread would produce — and dispatches it via
+        ``handle_message``. ``raw_message`` is ``None`` (synthetic event), the
+        same shape other injected/synthetic events use.
+        """
+        channel = getattr(interaction, "channel", None)
+        user = getattr(interaction, "user", None)
+        if channel is None or user is None:
+            return
+
+        is_thread = isinstance(channel, discord.Thread)
+        is_dm = isinstance(channel, discord.DMChannel)
+        thread_id = str(channel.id) if is_thread else None
+        parent_channel_id = (
+            self._get_parent_channel_id(channel) if is_thread else None
+        )
+        guild = getattr(channel, "guild", None)
+
+        if is_dm:
+            chat_type = "dm"
+            chat_name = getattr(user, "display_name", None) or getattr(user, "name", "DM")
+        elif is_thread:
+            chat_type = "thread"
+            chat_name = self._format_thread_chat_name(channel)
+        else:
+            chat_type = "group"
+            chat_name = getattr(channel, "name", str(channel.id))
+            if guild is not None:
+                chat_name = f"{getattr(guild, 'name', '')} / #{chat_name}"
+
+        chat_topic = self._get_effective_topic(channel, is_thread=is_thread)
+
+        source = self.build_source(
+            chat_id=str(channel.id),
+            chat_name=chat_name,
+            chat_type=chat_type,
+            user_id=str(getattr(user, "id", "")),
+            user_name=getattr(user, "display_name", None) or getattr(user, "name", "user"),
+            thread_id=thread_id,
+            chat_topic=chat_topic,
+            is_bot=bool(getattr(user, "bot", False)),
+            guild_id=str(guild.id) if guild is not None else None,
+            parent_chat_id=parent_channel_id,
+            # The click already passed _component_check_auth; mirror on_message's
+            # role-authorized flag so downstream gating treats this like a
+            # genuine allowlisted user message.
+            role_authorized=bool(self._allowed_role_ids),
+        )
+
+        event = MessageEvent(
+            text=choice_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=None,
+        )
+
+        logger.info(
+            "[%s] Auto-choice injected as user turn (chat=%s, user=%s, choice=%r)",
+            self.name, source.chat_id,
+            getattr(user, "display_name", "?"), choice_text,
+        )
+        await self.handle_message(event)
 
     async def _send_to_forum(self, forum_channel: Any, content: str) -> SendResult:
         """Create a thread post in a forum channel with the message as starter content.
@@ -3832,15 +3977,729 @@ class DiscordAdapter(BasePlatformAdapter):
         if resolved_count:
             print(f"[{self.name}] Updated DISCORD_ALLOWED_USERS with {resolved_count} resolved ID(s)")
 
+    # ------------------------------------------------------------------
+    # Markdown table → monospace code block
+    #
+    # Discord does not render GitHub-flavored markdown tables — they arrive
+    # as walls of raw ``|`` pipes whose columns don't line up in the default
+    # proportional font. We re-render each table as an aligned, fixed-width
+    # grid wrapped in a ``` code block so the pipes line up and the table
+    # stays inline within its message (unlike an embed, which detaches it).
+    # ------------------------------------------------------------------
+    _TABLE_SEP_CELL_RE = re.compile(r":?-+:?")
+
+    @staticmethod
+    def _looks_like_table_row(line: str) -> bool:
+        """A candidate table/header/data row contains at least one pipe."""
+        return "|" in line
+
+    @classmethod
+    def _looks_like_separator_row(cls, line: str) -> bool:
+        """True for a markdown separator row like ``|---|:--:|``.
+
+        Every cell must consist solely of hyphens with optional leading/
+        trailing colons (``:?-+:?``). This is the distinctive signal that a
+        preceding pipe-bearing line is really a table header rather than a
+        sentence that happens to contain a pipe.
+        """
+        s = line.strip()
+        if not s or "-" not in s:
+            return False
+        cells = s.strip("|").split("|")
+        return all(cls._TABLE_SEP_CELL_RE.fullmatch(c.strip()) for c in cells) and bool(cells)
+
+    @staticmethod
+    def _display_width(s: str) -> int:
+        """Monospace display width of *s*.
+
+        East-Asian Wide/Fullwidth characters (CJK) render as two cells in
+        Discord's fixed-width code-block font, but ``len()`` counts them as
+        one — so padding by ``len`` misaligns any column containing CJK text.
+        Count W/F as 2, everything else as 1. (Not exact for ambiguous-width
+        glyphs or emoji, but correct for the common CJK case.)
+        """
+        return sum(
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s
+        )
+
+    # Inline markdown delimiters, longest first. Flags: b bold, i italic,
+    # s strikethrough, c code ("bi" = bold+italic).
+    _MD_INLINE_DELIMS = (("***", "bi"), ("**", "b"), ("*", "i"), ("~~", "s"), ("`", "c"))
+
+    @classmethod
+    def _parse_inline_md(cls, text: str, active: frozenset = frozenset()) -> list:
+        """Parse inline markdown in *text* into ``[(segment, flags), ...]``,
+        where ``flags`` is a subset of ``{'b','i','s','c'}``. Unmatched markers
+        are kept literal. Used to render bold/etc. instead of showing the raw
+        ``**`` markers.
+        """
+        runs: list = []
+        buf: List[str] = []
+
+        def _flush() -> None:
+            if buf:
+                runs.append(("".join(buf), active))
+                buf.clear()
+
+        i, n = 0, len(text)
+        while i < n:
+            matched = False
+            for delim, flag in cls._MD_INLINE_DELIMS:
+                if text.startswith(delim, i):
+                    close = text.find(delim, i + len(delim))
+                    if close != -1 and close > i + len(delim):
+                        inner = text[i + len(delim):close]
+                        _flush()
+                        if flag == "c":  # code span: literal, no nested parse
+                            runs.append((inner, active | {"c"}))
+                        else:
+                            runs.extend(cls._parse_inline_md(inner, active | set(flag)))
+                        i = close + len(delim)
+                        matched = True
+                        break
+            if not matched:
+                buf.append(text[i])
+                i += 1
+        _flush()
+        return runs
+
+    @classmethod
+    def _strip_inline_md(cls, text: str) -> str:
+        """Plain text with inline-markdown markers removed."""
+        return "".join(t for t, _ in cls._parse_inline_md(text))
+
+    @classmethod
+    def _render_table_text(cls, header_line: str, data_lines: list) -> Optional[str]:
+        """Render a markdown table as an aligned monospace ``` code block.
+
+        Each column is padded to its widest cell (by display width, so CJK
+        text stays aligned) so the pipes line up under Discord's fixed-width
+        code-block font. Rows are padded/truncated to the header's column
+        count. Returns ``None`` when there are no columns to render.
+        """
+        headers = [cls._strip_inline_md(h.strip()) for h in header_line.strip().strip("|").split("|")]
+        ncols = len(headers)
+        if ncols == 0 or (ncols == 1 and not headers[0]):
+            return None
+
+        rows = []
+        for line in data_lines:
+            cells = [cls._strip_inline_md(c.strip()) for c in line.strip().strip("|").split("|")]
+            if len(cells) < ncols:
+                cells += [""] * (ncols - len(cells))
+            elif len(cells) > ncols:
+                cells = cells[:ncols]
+            rows.append(cells)
+
+        widths = []
+        for c in range(ncols):
+            w = cls._display_width(headers[c])
+            for r in rows:
+                w = max(w, cls._display_width(r[c]))
+            widths.append(w)
+
+        def _pad(s: str, w: int) -> str:
+            return s + " " * (w - cls._display_width(s))
+
+        def _fmt(cells: list) -> str:
+            return " | ".join(_pad(cells[c], widths[c]) for c in range(ncols)).rstrip()
+
+        out = [_fmt(headers), "-|-".join("-" * widths[c] for c in range(ncols))]
+        out.extend(_fmt(r) for r in rows)
+        return "```\n" + "\n".join(out) + "\n```"
+
+    @classmethod
+    def _reflow_tables_in_segment(cls, text: str) -> str:
+        """Re-render markdown tables in *text* (already known to be outside any
+        code fence) as aligned code blocks, in place."""
+        lines = text.split("\n")
+        n = len(lines)
+        out: List[str] = []
+        i = 0
+        while i < n:
+            if (
+                i + 1 < n
+                and cls._looks_like_table_row(lines[i])
+                and cls._looks_like_separator_row(lines[i + 1])
+            ):
+                header = lines[i]
+                j = i + 2
+                data: List[str] = []
+                while j < n and cls._looks_like_table_row(lines[j]):
+                    data.append(lines[j])
+                    j += 1
+                rendered = cls._render_table_text(header, data)
+                if rendered is not None:
+                    out.append(rendered)  # replaces header + separator + data
+                    i = j
+                    continue
+            out.append(lines[i])
+            i += 1
+        return "\n".join(out)
+
+    @classmethod
+    def _convert_tables_to_code_blocks(cls, content: str) -> str:
+        """Wrap each markdown table in *content* in an aligned monospace code
+        block, leaving everything else (including tables already inside
+        triple-backtick fences) untouched. Returns *content* unchanged when it
+        contains no convertible table.
+        """
+        if not content or "|" not in content:
+            return content
+
+        FENCE = "```"
+        segments = content.split(FENCE)
+        parts: List[str] = []
+        changed = False
+        for idx, seg in enumerate(segments):
+            if idx % 2 == 1:  # inside a fenced code block → keep verbatim
+                parts.append(f"{FENCE}{seg}{FENCE}")
+                continue
+            reflowed = cls._reflow_tables_in_segment(seg)
+            parts.append(reflowed)
+            if reflowed != seg:
+                changed = True
+
+        return "".join(parts) if changed else content
+
+    # ------------------------------------------------------------------
+    # Markdown table → PNG image (deterministic Pillow render)
+    #
+    # A code block can't align CJK text (Discord reaches CJK via a font
+    # fallback whose glyphs aren't a clean multiple of the space width), so
+    # for the primary send path we render each table to a PNG with Pillow —
+    # pixel-accurate alignment for any script. The message is split at the
+    # table's position so the image lands inline between the surrounding
+    # prose (text-before → image → text-after). If Pillow or a font is
+    # unavailable, callers fall back to the monospace code block.
+    # ------------------------------------------------------------------
+    _TABLE_IMG_FONT_SIZE = 30
+    _TABLE_IMG_PAD_X = 18
+    _TABLE_IMG_PAD_Y = 12
+    _TABLE_IMG_BG = (49, 51, 56)         # Discord dark chat background
+    _TABLE_IMG_HEADER_BG = (43, 45, 49)
+    _TABLE_IMG_GRID = (78, 80, 88)
+    _TABLE_IMG_TEXT = (219, 222, 225)
+    _TABLE_IMG_HEADER_TEXT = (255, 255, 255)
+    _TABLE_IMG_FILENAME = "table.png"
+    # (regular, bold) font pairs, tried in order across Linux/Windows/macOS.
+    _TABLE_FONT_CANDIDATES = [
+        ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+        ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+         "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"),
+        ("C:/Windows/Fonts/msjh.ttc", "C:/Windows/Fonts/msjhbd.ttc"),   # JhengHei (TC)
+        ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc"),   # YaHei (SC)
+        ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/PingFang.ttc"),
+    ]
+    _table_font_cache: dict = {}
+
+    @classmethod
+    def _split_message_parts(cls, content: str) -> List[dict]:
+        """Split *content* into ordered parts, isolating each markdown table.
+
+        Returns a list of ``{"type": "text", "text": str}`` and
+        ``{"type": "table", "header": str, "rows": [str, ...]}`` dicts, in
+        document order. Tables inside triple-backtick fences stay as text.
+        Content with no table comes back as a single text part.
+        """
+        if not content or "|" not in content:
+            return [{"type": "text", "text": content}]
+
+        parts: List[dict] = []
+
+        def add_text(s: str) -> None:
+            if not s:
+                return
+            if parts and parts[-1]["type"] == "text":
+                parts[-1]["text"] += s
+            else:
+                parts.append({"type": "text", "text": s})
+
+        FENCE = "```"
+        segments = content.split(FENCE)
+        for idx, seg in enumerate(segments):
+            if idx % 2 == 1:  # inside a fenced code block
+                # A fence whose entire body is just a markdown table is almost
+                # always a table the agent wrapped for display (real code never
+                # has a bare |---|---| separator line) — image it too. Anything
+                # else stays verbatim code.
+                fenced_tbl = cls._fenced_pure_table(seg)
+                if fenced_tbl is not None:
+                    parts.append({
+                        "type": "table",
+                        "header": fenced_tbl[0],
+                        "rows": fenced_tbl[1],
+                    })
+                else:
+                    add_text(f"{FENCE}{seg}{FENCE}")
+                continue
+            lines = seg.split("\n")
+            n = len(lines)
+            buf: List[str] = []
+            i = 0
+            while i < n:
+                if (
+                    i + 1 < n
+                    and cls._looks_like_table_row(lines[i])
+                    and cls._looks_like_separator_row(lines[i + 1])
+                ):
+                    header = lines[i]
+                    j = i + 2
+                    data: List[str] = []
+                    while j < n and cls._looks_like_table_row(lines[j]):
+                        data.append(lines[j])
+                        j += 1
+                    add_text("\n".join(buf))
+                    buf = []
+                    parts.append({"type": "table", "header": header, "rows": data})
+                    i = j
+                else:
+                    buf.append(lines[i])
+                    i += 1
+            add_text("\n".join(buf))
+
+        return parts or [{"type": "text", "text": content}]
+
+    @classmethod
+    def _fenced_pure_table(cls, seg: str) -> Optional[tuple]:
+        """If a fenced block's body is nothing but a markdown table, return
+        ``(header_line, [data_rows])``; otherwise ``None`` (keep it as code).
+
+        Tolerates an optional single language-tag line (```` ```markdown ````)
+        and surrounding blank lines, but rejects anything with non-table lines
+        so real code is never converted.
+        """
+        lines = seg.split("\n")
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        # Drop an opening language tag (single bare token, no pipe): ```python
+        if (
+            lines
+            and "|" not in lines[0]
+            and re.fullmatch(r"[A-Za-z0-9_.+#-]+", lines[0].strip() or "")
+        ):
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+        if len(lines) < 2:
+            return None
+        if not (
+            cls._looks_like_table_row(lines[0])
+            and cls._looks_like_separator_row(lines[1])
+        ):
+            return None
+        if not all(cls._looks_like_table_row(ln) for ln in lines[2:]):
+            return None
+        return (lines[0], lines[2:])
+
+    @staticmethod
+    def _hermes_fonts_dir() -> str:
+        """Drop-in font directory: put any open-source .ttf/.otf/.ttc here and
+        table rendering picks it up (no packaging needed)."""
+        base = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        return os.path.join(base, "fonts")
+
+    @classmethod
+    def _discover_dropped_in_font(cls, size: int, _try):
+        """Load a font from the drop-in dir (``$HERMES_HOME/fonts``). Any font
+        file there is used; a ``*bold*`` file is paired as the bold face when
+        present. Returns a ``(regular, bold)`` tuple or ``None``."""
+        fdir = cls._hermes_fonts_dir()
+        if not os.path.isdir(fdir):
+            return None
+        try:
+            files = sorted(
+                os.path.join(fdir, f)
+                for f in os.listdir(fdir)
+                if f.lower().endswith((".ttf", ".otf", ".ttc", ".otc"))
+                and "emoji" not in f.lower()  # emoji fonts are resolved separately
+            )
+        except Exception:
+            return None
+        if not files:
+            return None
+
+        def _is_bold(p: str) -> bool:
+            return "bold" in os.path.basename(p).lower()
+
+        def _is_styled(p: str) -> bool:
+            n = os.path.basename(p).lower()
+            return any(w in n for w in ("bold", "italic", "oblique"))
+
+        reg = next((f for f in files if not _is_styled(f)), files[0])
+        bold = next((f for f in files if _is_bold(f)), reg)
+        return _try(reg, bold)
+
+    @classmethod
+    def _load_table_fonts(cls, size: int):
+        """Return ``(regular, bold)`` PIL fonts for table rendering, or
+        ``(None, None)`` if Pillow or a suitable font is unavailable. Cached
+        per size.
+
+        Resolution order: ``HERMES_TABLE_FONT`` env override → curated system
+        paths (Noto CJK / JhengHei / PingFang) → any font dropped into
+        ``$HERMES_HOME/fonts``. All are open-source-font friendly and never
+        require bundling a large CJK font in the package.
+        """
+        if size in cls._table_font_cache:
+            return cls._table_font_cache[size]
+        result = (None, None)
+        try:
+            from PIL import ImageFont
+        except Exception:
+            cls._table_font_cache[size] = result
+            return result
+
+        def _try(reg, bold):
+            try:
+                font = ImageFont.truetype(reg, size)
+            except Exception:
+                return None
+            try:
+                font_b = ImageFont.truetype(bold, size) if bold else font
+            except Exception:
+                font_b = font
+            return (font, font_b)
+
+        # 1. Explicit override — point at any open-source font directly.
+        env_reg = os.environ.get("HERMES_TABLE_FONT")
+        if env_reg:
+            got = _try(env_reg, os.environ.get("HERMES_TABLE_FONT_BOLD") or env_reg)
+            if got:
+                result = got
+
+        # 2. Curated known system CJK fonts.
+        if result == (None, None):
+            for reg, bold in cls._TABLE_FONT_CANDIDATES:
+                got = _try(reg, bold)
+                if got:
+                    result = got
+                    break
+
+        # 3. Drop-in dir ($HERMES_HOME/fonts) — install a font by placing it there.
+        if result == (None, None):
+            got = cls._discover_dropped_in_font(size, _try)
+            if got:
+                result = got
+
+        cls._table_font_cache[size] = result
+        return result
+
+    # ------------------------------------------------------------------
+    # Emoji rendering
+    #
+    # Emoji live in a dedicated emoji font, not Noto Sans CJK, so a cell like
+    # "Done ✅" needs per-run font fallback. Color emoji fonts (e.g. Noto Color
+    # Emoji, CBDT) only load at a fixed bitmap strike, so we render at the
+    # strike and resize to the text line height, then alpha-paste.
+    # ------------------------------------------------------------------
+    _EMOJI_FONT_CANDIDATES = [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+        "C:/Windows/Fonts/seguiemj.ttf",
+    ]
+    _EMOJI_STRIKE_SIZES = (109, 128, 136, 96, 72, 64, 32)
+    _emoji_font_cache: dict = {}
+
+    @classmethod
+    def _emoji_font_path(cls) -> Optional[str]:
+        """Resolve an emoji font: ``HERMES_EMOJI_FONT`` env → known system
+        paths → an ``*emoji*`` file in the drop-in dir ($HERMES_HOME/fonts)."""
+        env = os.environ.get("HERMES_EMOJI_FONT")
+        if env and os.path.exists(env):
+            return env
+        for c in cls._EMOJI_FONT_CANDIDATES:
+            if os.path.exists(c):
+                return c
+        fdir = cls._hermes_fonts_dir()
+        if os.path.isdir(fdir):
+            try:
+                for f in sorted(os.listdir(fdir)):
+                    low = f.lower()
+                    if "emoji" in low and low.endswith((".ttf", ".otf", ".ttc")):
+                        return os.path.join(fdir, f)
+            except Exception:
+                pass
+        return None
+
+    @classmethod
+    def _load_emoji_font(cls):
+        """Return a PIL emoji font (loaded at its bitmap strike), or ``None``.
+        Cached."""
+        if "f" in cls._emoji_font_cache:
+            return cls._emoji_font_cache["f"]
+        font = None
+        try:
+            from PIL import ImageFont
+            path = cls._emoji_font_path()
+            if path:
+                for sz in cls._EMOJI_STRIKE_SIZES:
+                    try:
+                        font = ImageFont.truetype(path, sz)
+                        break
+                    except Exception:
+                        continue
+        except Exception:
+            font = None
+        cls._emoji_font_cache["f"] = font
+        return font
+
+    @staticmethod
+    def _is_emoji_char(ch: str) -> bool:
+        o = ord(ch)
+        return (
+            0x1F300 <= o <= 0x1FAFF   # pictographs, emoticons, transport, symbols
+            or 0x1F1E6 <= o <= 0x1F1FF  # regional indicators (flags)
+            or 0x2600 <= o <= 0x27BF    # misc symbols + dingbats (✅ ✨ ❌ …)
+            or 0x2B00 <= o <= 0x2BFF    # stars/arrows (⭐ …)
+            or o in (0x203C, 0x2049, 0x2122, 0x2139)
+        )
+
+    @staticmethod
+    def _is_emoji_mod(ch: str) -> bool:
+        """Zero-width joiner / variation selector / skin-tone / keycap — glued
+        onto the current emoji cluster."""
+        o = ord(ch)
+        return o in (0x200D, 0xFE0F, 0xFE0E, 0x20E3) or 0x1F3FB <= o <= 0x1F3FF
+
+    @classmethod
+    def _split_emoji_runs(cls, text: str) -> list:
+        """Split *text* into ``[(segment, is_emoji), ...]`` runs so emoji
+        segments can be drawn with the emoji font. ZWJ sequences, variation
+        selectors and skin-tone modifiers stay attached to their emoji."""
+        segs: list = []
+        cur: List[str] = []
+        cur_emoji = None
+        for ch in text:
+            kind = bool(cls._is_emoji_char(ch) or (cls._is_emoji_mod(ch) and cur_emoji))
+            if cur and cur_emoji == kind:
+                cur.append(ch)
+            else:
+                if cur:
+                    segs.append(("".join(cur), cur_emoji))
+                cur, cur_emoji = [ch], kind
+        if cur:
+            segs.append(("".join(cur), cur_emoji))
+        return segs
+
+    @classmethod
+    def _render_table_image(cls, header_line: str, data_lines: list) -> Optional[bytes]:
+        """Render a markdown table to PNG bytes (deterministic — Pillow only,
+        no AI). Returns ``None`` if Pillow/font is unavailable, the table has
+        no columns, or rendering fails, so callers can fall back to text."""
+        try:
+            from PIL import Image, ImageDraw
+        except Exception:
+            return None
+        try:
+            font, font_b = cls._load_table_fonts(cls._TABLE_IMG_FONT_SIZE)
+            if font is None:
+                return None
+
+            def _cells(line: str) -> list:
+                return [c.strip() for c in line.strip().strip("|").split("|")]
+
+            header_cells = _cells(header_line)
+            ncols = len(header_cells)
+            if ncols == 0 or (ncols == 1 and not header_cells[0]):
+                return None
+            # Parse inline markdown (**bold** etc.) into styled runs per cell.
+            headers = [cls._parse_inline_md(c) for c in header_cells]
+            rows = []
+            for line in data_lines:
+                cells = _cells(line)
+                cells = (cells + [""] * ncols)[:ncols]
+                rows.append([cls._parse_inline_md(c) for c in cells])
+
+            measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+            ascent, descent = font.getmetrics()
+
+            def _font(flags, header: bool):
+                # Header cells are bold; body cells bold only for **bold** runs.
+                # (No CJK italic/mono face exists, so those flags don't change
+                # the glyphs — the markers are simply stripped.)
+                return font_b if (header or "b" in flags) else font
+
+            # Emoji: render each emoji segment with the emoji font at its bitmap
+            # strike, then resize to the text height and alpha-paste. Cached per
+            # segment for this render.
+            emoji_font = cls._load_emoji_font()
+            emoji_h = ascent
+            ecache: dict = {}
+
+            def _emoji_im(seg: str):
+                if emoji_font is None:
+                    return None
+                if seg in ecache:
+                    return ecache[seg]
+                im = None
+                try:
+                    strike = getattr(emoji_font, "size", 109) or 109
+                    canvas = Image.new(
+                        "RGBA", (strike * (len(seg) + 2), strike + 60), (0, 0, 0, 0)
+                    )
+                    ImageDraw.Draw(canvas).text(
+                        (0, 0), seg, font=emoji_font, embedded_color=True
+                    )
+                    bbox = canvas.getbbox()
+                    if bbox:
+                        crop = canvas.crop(bbox)
+                        scale = emoji_h / crop.height
+                        im = crop.resize(
+                            (max(1, int(crop.width * scale)), emoji_h), Image.LANCZOS
+                        )
+                except Exception:
+                    im = None
+                ecache[seg] = im
+                return im
+
+            def _subruns(runs):
+                # → [(segment, flags, emoji_image_or_None)].
+                out = []
+                for t, fl in runs:
+                    if not t:
+                        continue
+                    if emoji_font is None:
+                        out.append((t, fl, None))
+                        continue
+                    for seg, is_e in cls._split_emoji_runs(t):
+                        out.append((seg, fl, _emoji_im(seg) if is_e else None))
+                return out
+
+            def _runs_width(runs, header: bool) -> int:
+                w = 0
+                for seg, fl, em in _subruns(runs):
+                    w += em.width if em is not None else int(
+                        measure.textlength(seg, font=_font(fl, header))
+                    )
+                return w
+
+            padx, pady = cls._TABLE_IMG_PAD_X, cls._TABLE_IMG_PAD_Y
+            col_w = []
+            for c in range(ncols):
+                w = _runs_width(headers[c], True)
+                for r in rows:
+                    w = max(w, _runs_width(r[c], False))
+                col_w.append(w + 2 * padx)
+
+            row_h = ascent + descent + 2 * pady
+            width = sum(col_w) + 1
+            height = row_h * (len(rows) + 1) + 1
+
+            img = Image.new("RGB", (width, height), cls._TABLE_IMG_BG)
+            dr = ImageDraw.Draw(img)
+            dr.rectangle([0, 0, width, row_h], fill=cls._TABLE_IMG_HEADER_BG)
+
+            xs = [0]
+            for w in col_w:
+                xs.append(xs[-1] + w)
+            for x in xs:
+                dr.line([(x, 0), (x, height)], fill=cls._TABLE_IMG_GRID, width=1)
+            for ri in range(len(rows) + 2):
+                y = ri * row_h
+                dr.line([(0, y), (width, y)], fill=cls._TABLE_IMG_GRID, width=1)
+
+            strike_y = pady + ascent // 2
+
+            def _draw_cell(ci: int, ri: int, runs, header: bool, color) -> None:
+                x = xs[ci] + padx
+                y = ri * row_h + pady
+                for seg, fl, em in _subruns(runs):
+                    if em is not None:  # emoji image
+                        ey = ri * row_h + pady + (ascent - em.height) // 2
+                        img.paste(em, (x, ey), em)
+                        x += em.width
+                        continue
+                    f = _font(fl, header)
+                    dr.text((x, y), seg, font=f, fill=color)
+                    w = int(measure.textlength(seg, font=f))
+                    if "s" in fl:  # strikethrough
+                        yy = ri * row_h + strike_y
+                        dr.line([(x, yy), (x + w, yy)], fill=color, width=2)
+                    x += w
+
+            for c in range(ncols):
+                _draw_cell(c, 0, headers[c], True, cls._TABLE_IMG_HEADER_TEXT)
+            for i, r in enumerate(rows, start=1):
+                for c in range(ncols):
+                    _draw_cell(c, i, r[c], False, cls._TABLE_IMG_TEXT)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[Discord] table image render failed: %s", e)
+            return None
+
+    def _build_outgoing_items(self, content: str) -> List[dict]:
+        """Turn *content* into an ordered list of send items, each either
+        ``{"content": str}`` (a text chunk) or ``{"image": bytes}`` (a rendered
+        table PNG).
+
+        When no table renders to an image (no tables, or Pillow/font missing)
+        the original inline behaviour is preserved: the whole message is
+        code-block-formatted and chunked. Otherwise the message is split at
+        each table so images land inline between the surrounding prose.
+        """
+        parts = self._split_message_parts(content)
+        for p in parts:
+            if p["type"] == "table":
+                p["image"] = self._render_table_image(p["header"], p["rows"])
+
+        if not any(p.get("image") for p in parts):
+            # No table images → unchanged inline path (code-block fallback).
+            formatted = self.format_message(content)
+            return [
+                {"content": chunk}
+                for chunk in self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            ]
+
+        items: List[dict] = []
+        for p in parts:
+            if p["type"] == "table" and p.get("image"):
+                items.append({"image": p["image"]})
+                continue
+            if p["type"] == "table":  # image failed for this one → code block
+                text = self._render_table_text(p["header"], p["rows"]) or ""
+            else:
+                text = self.format_message(p["text"])
+            # Each part is its own message; trim the surrounding whitespace the
+            # split left behind (Discord would strip it anyway).
+            text = text.strip()
+            if not text:
+                continue
+            for chunk in self.truncate_message(text, self.MAX_MESSAGE_LENGTH):
+                if chunk.strip():
+                    items.append({"content": chunk})
+        return items
+
+    @classmethod
+    def _discord_send_kwargs(cls, item: dict, reference) -> dict:
+        """Build ``channel.send(**kwargs)`` for one outgoing item. A fresh
+        ``discord.File`` is constructed each call because its stream is
+        consumed on send — a retry needs a new one."""
+        if "image" in item:
+            return {
+                "file": discord.File(
+                    io.BytesIO(item["image"]), filename=cls._TABLE_IMG_FILENAME
+                ),
+                "reference": reference,
+            }
+        return {"content": item["content"], "reference": reference}
+
     def format_message(self, content: str) -> str:
         """Format message for Discord.
 
-        Converts GFM markdown tables to bullet-list groups since Discord
-        does not render pipe tables natively.
+        Discord does not render markdown tables. The primary ``send()`` path
+        renders them to inline images; this text fallback (used by the forum
+        and edit paths, and when image rendering is unavailable) re-renders
+        each table as an aligned monospace code block.
         """
-        if not content:
-            return content
-        return convert_table_to_bullets(content)
+        return self._convert_tables_to_code_blocks(content)
 
     async def _run_simple_slash(
         self,
@@ -3909,8 +4768,25 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_model(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/model {name}".strip())
 
-        @tree.command(name="reasoning", description="Show or change reasoning effort")
-        @discord.app_commands.describe(effort="Reasoning effort: none, minimal, low, medium, high, or xhigh.")
+        @tree.command(name="reasoning", description="Show/change reasoning effort, or toggle showing it")
+        @discord.app_commands.describe(effort="Pick a level, reset the override, or show/hide reasoning. Leave empty to see current.")
+        @discord.app_commands.choices(effort=[
+            # Effort levels and the reset/show/hide subcommands all arrive on the
+            # gateway's single `/reasoning <arg>` handler. Discord's native UI has
+            # no subcommand affordance for a free-text field (it just funnels the
+            # user into the `effort` box), so expose every accepted value as an
+            # explicit choice. --global persistence stays reachable by typing the
+            # command as plain text.
+            discord.app_commands.Choice(name="none — disable reasoning", value="none"),
+            discord.app_commands.Choice(name="minimal", value="minimal"),
+            discord.app_commands.Choice(name="low", value="low"),
+            discord.app_commands.Choice(name="medium", value="medium"),
+            discord.app_commands.Choice(name="high", value="high"),
+            discord.app_commands.Choice(name="xhigh — maximum reasoning", value="xhigh"),
+            discord.app_commands.Choice(name="reset — clear this session's override", value="reset"),
+            discord.app_commands.Choice(name="show — reveal reasoning in replies", value="show"),
+            discord.app_commands.Choice(name="hide — hide reasoning from replies", value="hide"),
+        ])
         async def slash_reasoning(interaction: discord.Interaction, effort: str = ""):
             await self._run_simple_slash(interaction, f"/reasoning {effort}".strip())
 
@@ -3961,6 +4837,17 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="usage", description="Show token usage for this session")
         async def slash_usage(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/usage")
+
+        @tree.command(name="tokens", description="Toggle a per-message token breakdown on replies")
+        @discord.app_commands.describe(state="on (this session), off, always (all chats), or status")
+        @discord.app_commands.choices(state=[
+            discord.app_commands.Choice(name="on — show token breakdown in this session", value="on"),
+            discord.app_commands.Choice(name="off — hide token breakdown (clears global)", value="off"),
+            discord.app_commands.Choice(name="always — show in every conversation", value="always"),
+            discord.app_commands.Choice(name="status — show current setting", value="status"),
+        ])
+        async def slash_tokens(interaction: discord.Interaction, state: str = ""):
+            await self._run_simple_slash(interaction, f"/tokens {state}".strip())
 
         @tree.command(name="help", description="Show available commands")
         async def slash_help(interaction: discord.Interaction):
@@ -4572,6 +5459,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
+
+    def _discord_auto_choice_buttons(self) -> bool:
+        """Return whether auto-detected choice buttons are enabled.
+
+        When True (default), an ordinary reply that already poses a question
+        with a short list of options gets clickable buttons appended; clicking
+        one injects that option as a new user message. Disable via
+        ``discord.auto_choice_buttons: false`` or DISCORD_AUTO_CHOICE_BUTTONS.
+        """
+        configured = self.config.extra.get("auto_choice_buttons")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() not in {"false", "0", "no", "off"}
+            return bool(configured)
+        return os.getenv("DISCORD_AUTO_CHOICE_BUTTONS", "true").lower() not in {"false", "0", "no", "off"}
 
     def _discord_allow_any_attachment(self) -> bool:
         """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
@@ -6397,6 +7299,162 @@ def _component_check_auth(
     return False
 
 
+# ── Auto-detected choice buttons ──────────────────────────────────────────
+# When an ordinary agent reply already contains a question + a short list of
+# options, the Discord adapter offers the same clickable buttons the clarify
+# tool would — without any gateway/clarify-tool involvement. Clicking a button
+# injects the chosen option as if the user had typed it, kicking off a fresh
+# agent turn. See ``DiscordAdapter._maybe_send_choice_buttons``.
+
+# Circled-number markers (①..⑳) used by some models for option lists.
+_CIRCLED_NUMBER_MARKERS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+# Ordered by strength of the "this is a menu" signal. The first style that
+# yields >=2 options wins, so an explicit numbered menu is preferred over a
+# loose bullet list that happens to share the message.
+_CHOICE_LINE_PATTERNS = (
+    re.compile(r"^\s*\d{1,2}\s*[.)、．]\s+(?P<text>\S.*)$"),
+    re.compile(r"^\s*[" + _CIRCLED_NUMBER_MARKERS + r"]\s*(?P<text>\S.*)$"),
+    re.compile(r"^\s*[A-Za-z]\s*[).]\s+(?P<text>\S.*)$"),
+    re.compile(r"^\s*[-*•·]\s+(?P<text>\S.*)$"),
+)
+
+
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    seen: set = set()
+    out: List[str] = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
+
+def _clean_choice_text(text: str) -> str:
+    """Trim a parsed option down to a clean button label body.
+
+    Strips surrounding markdown emphasis (``**bold**``, ``*italic*``,
+    ``` `code` ```) that would otherwise bloat the label, plus trailing
+    list punctuation.
+    """
+    opt = text.strip()
+    opt = opt.strip("*_`").strip()
+    opt = opt.rstrip(" ,，、;；")
+    return opt.strip()
+
+
+# Explicit format prefixes the agent uses to opt a reply into clickable
+# buttons. A line starting with ``? `` (one question mark + space) marks a
+# single-choice prompt; ``?? `` (two question marks + space) marks a
+# multi-select prompt. Without one of these prefixes the reply is left alone,
+# so incidental numbered/bulleted lists (deploy steps, citations, guesses)
+# never sprout buttons.
+_SINGLE_CHOICE_PREFIX = "? "
+_MULTI_CHOICE_PREFIX = "?? "
+
+
+def _detect_choice_prefix(text: str) -> Optional[bool]:
+    """Return the choice mode declared by a leading prefix line, or ``None``.
+
+    Scans lines for the first ``?? ``/``? `` prefix. Returns ``True`` for
+    multi-select, ``False`` for single-select, ``None`` when neither prefix is
+    present (i.e. the reply is not opting into buttons).
+    """
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(_MULTI_CHOICE_PREFIX):
+            return True
+        if stripped.startswith(_SINGLE_CHOICE_PREFIX):
+            return False
+    return None
+
+
+def _extract_choice_question(content: str) -> str:
+    """Pull the question text off the prefix line, sans ``? ``/``?? `` marker.
+
+    ``"? 你想要什麼服務？"`` → ``"你想要什麼服務？"``. Returns ``""`` if no
+    prefix line is found.
+    """
+    if not content:
+        return ""
+    for line in content.strip().splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_MULTI_CHOICE_PREFIX):
+            return stripped[len(_MULTI_CHOICE_PREFIX):].strip()
+        if stripped.startswith(_SINGLE_CHOICE_PREFIX):
+            return stripped[len(_SINGLE_CHOICE_PREFIX):].strip()
+    return ""
+
+
+def _detect_inline_choices(
+    content: str, *, max_choices: int = 24,
+) -> "tuple[List[str], bool]":
+    """Extract clickable choices from an outbound message.
+
+    Detection is gated on an explicit prefix line — ``? `` for single-select
+    or ``?? `` for multi-select. Without a prefix nothing is returned, so
+    incidental numbered lists (step-by-step instructions, citations, guesses)
+    don't sprout buttons.
+
+    Returns ``(choices, multi_select)``: clean option bodies WITHOUT their
+    leading markers (the view adds its own ``1.``/``2.`` numbering), capped at
+    ``max_choices``, and a flag indicating multi-select mode. ``([], False)``
+    when no prefix is present or fewer than two options parse out.
+    """
+    if not content or not content.strip():
+        return [], False
+    text = content.strip()
+
+    mode = _detect_choice_prefix(text)
+    if mode is None:
+        return [], False
+    multi_select = mode
+
+    lines = text.splitlines()
+    for pattern in _CHOICE_LINE_PATTERNS:
+        items: List[str] = []
+        for line in lines:
+            m = pattern.match(line)
+            if m:
+                opt = _clean_choice_text(m.group("text"))
+                if opt:
+                    items.append(opt)
+        items = _dedupe_keep_order(items)
+        if len(items) >= 2:
+            return items[:max_choices], multi_select
+
+    return [], multi_select
+
+
+def _fit_button_label(prefix: str, choice: str, *, limit: int = 80) -> str:
+    """Build a Discord button label (≤80 chars) cutting at a word boundary.
+
+    Mirrors ``ClarifyChoiceView``'s cut strategy: prefer the last space in the
+    trailing half of the budget, then a soft boundary (``- , . )``), and fall
+    back to a hard cut with an ellipsis.
+    """
+    budget = limit - len(prefix)
+    if budget <= 1:
+        return (prefix + choice)[:limit]
+    if len(choice) <= budget:
+        return f"{prefix}{choice}"
+    truncated = choice[: budget - 1].rstrip()
+    cut_at = -1
+    space = truncated.rfind(" ")
+    if space >= budget // 2:
+        cut_at = space
+    if cut_at < 0:
+        latest_soft = max(
+            (truncated.rfind(s) for s in ("-", ",", ".", ")")),
+            default=-1,
+        )
+        if latest_soft >= budget // 2:
+            cut_at = latest_soft + 1
+    if cut_at > 0:
+        truncated = truncated[:cut_at]
+    return f"{prefix}{truncated.rstrip()}…"
+
+
 def _define_discord_view_classes() -> None:
     """Register Discord UI view classes as module globals.
 
@@ -6407,7 +7465,7 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, AutoChoiceView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -7283,6 +8341,221 @@ def _define_discord_view_classes() -> None:
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
+
+    class AutoChoiceView(discord.ui.View):
+        """Buttons auto-attached to replies that already pose a choice.
+
+        Unlike :class:`ClarifyChoiceView`, this view has NO gateway clarify
+        entry behind it — the agent never called the clarify tool. Picking a
+        button instead *injects* the chosen option back into the gateway as a
+        fresh user message (via ``adapter.handle_message``), exactly as if the
+        user had typed it. ``✏️ Other`` simply dismisses the buttons so the
+        user can type a free-form reply, which the normal message path
+        already handles.
+
+        Auth gating mirrors the clarify view — only allowlisted users/roles
+        may click. Single-select is single-use: the first valid click disables
+        all buttons. Multi-select toggles selections (green = picked) and stays
+        live until ``✅ Confirm`` injects the joined answer.
+        """
+
+        def __init__(
+            self,
+            adapter,
+            choices: List[str],
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+            multi_select: bool = False,
+        ):
+            super().__init__(timeout=600)  # 10-minute window
+            self._adapter = adapter
+            self.choices = list(choices)[:24]
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+            self._message = None
+            self.multi_select = multi_select
+            self._selected: "set[int]" = set()
+            self._choice_buttons: List[Any] = []
+            self._confirm_btn = None
+
+            for index, choice in enumerate(self.choices):
+                button = discord.ui.Button(
+                    label=_fit_button_label(f"{index + 1}. ", choice),
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"autochoice:{index}",
+                )
+                button.callback = self._make_choice_callback(index, choice)
+                self.add_item(button)
+                self._choice_buttons.append(button)
+
+            if self.multi_select:
+                confirm_btn = discord.ui.Button(
+                    label=self._confirm_label(),
+                    style=discord.ButtonStyle.success,
+                    custom_id="autochoice:confirm",
+                )
+                confirm_btn.callback = self._on_confirm
+                self.add_item(confirm_btn)
+                self._confirm_btn = confirm_btn
+
+            other_btn = discord.ui.Button(
+                label="✏️ Other (type answer)",
+                style=discord.ButtonStyle.secondary,
+                custom_id="autochoice:other",
+            )
+            other_btn.callback = self._on_other
+            self.add_item(other_btn)
+
+        def _confirm_label(self) -> str:
+            return f"✅ Confirm ({len(self._selected)} selected)"
+
+        def _check_auth(self, interaction: "discord.Interaction") -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        def _make_choice_callback(self, index: int, choice: str):
+            async def _callback(interaction: "discord.Interaction"):
+                await self._resolve_choice(interaction, index, choice)
+            return _callback
+
+        async def _disable_and_ack(self, interaction: "discord.Interaction") -> None:
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            try:
+                await interaction.response.edit_message(view=self)
+            except Exception:
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+
+        async def _resolve_choice(
+            self, interaction: "discord.Interaction", index: int, choice: str,
+        ) -> None:
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            if self.multi_select:
+                # Toggle the selection and keep the view live — nothing is
+                # injected until ✅ Confirm.
+                await self._toggle_choice(interaction, index)
+                return
+
+            await self._disable_and_ack(interaction)
+
+            # Inject the chosen option as a brand-new user turn. No clarify
+            # entry to resolve — this is a plain "user typed this" flow.
+            try:
+                await self._adapter._inject_user_choice(interaction, choice)
+            except Exception:
+                logger.error(
+                    "Discord auto-choice injection failed", exc_info=True,
+                )
+
+        async def _toggle_choice(
+            self, interaction: "discord.Interaction", index: int,
+        ) -> None:
+            """Flip option ``index`` on/off and repaint the buttons."""
+            if index in self._selected:
+                self._selected.discard(index)
+            else:
+                self._selected.add(index)
+
+            for i, button in enumerate(self._choice_buttons):
+                button.style = (
+                    discord.ButtonStyle.success
+                    if i in self._selected
+                    else discord.ButtonStyle.primary
+                )
+            if self._confirm_btn is not None:
+                self._confirm_btn.label = self._confirm_label()
+
+            try:
+                await interaction.response.edit_message(view=self)
+            except Exception:
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+
+        async def _on_confirm(self, interaction: "discord.Interaction") -> None:
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+            if not self._selected:
+                await interaction.response.send_message(
+                    "Pick at least one option first~", ephemeral=True,
+                )
+                return
+
+            # Join the picked options into one user turn, in display order,
+            # separated by the ideographic comma (、).
+            picked = [
+                self.choices[i]
+                for i in sorted(self._selected)
+                if i < len(self.choices)
+            ]
+            answer = "、".join(picked)
+
+            await self._disable_and_ack(interaction)
+            try:
+                await self._adapter._inject_user_choice(interaction, answer)
+            except Exception:
+                logger.error(
+                    "Discord auto-choice injection failed", exc_info=True,
+                )
+
+        async def _on_other(self, interaction: "discord.Interaction") -> None:
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            await self._disable_and_ack(interaction)
+            # Nothing to capture — the user's next normal message is picked up
+            # by on_message as usual. Just nudge them.
+            try:
+                await interaction.followup.send(
+                    "Go ahead and type your answer~", ephemeral=True,
+                )
+            except Exception:
+                pass
+
+        async def on_timeout(self):
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    await msg.edit(view=self)
+                except Exception:
+                    pass
+
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 

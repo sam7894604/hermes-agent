@@ -501,6 +501,7 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+        # Auto-choice: prefix "? " for single-select, "?? " for multi-select (Discord & Telegram)
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
@@ -624,6 +625,7 @@ class SessionEntry:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     cost_status: str = "unknown"
@@ -691,6 +693,7 @@ class SessionEntry:
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "total_tokens": self.total_tokens,
             "last_prompt_tokens": self.last_prompt_tokens,
             "estimated_cost_usd": self.estimated_cost_usd,
@@ -761,6 +764,7 @@ class SessionEntry:
             output_tokens=data.get("output_tokens", 0),
             cache_read_tokens=data.get("cache_read_tokens", 0),
             cache_write_tokens=data.get("cache_write_tokens", 0),
+            reasoning_tokens=data.get("reasoning_tokens", 0),
             total_tokens=data.get("total_tokens", 0),
             last_prompt_tokens=data.get("last_prompt_tokens", 0),
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
@@ -1974,7 +1978,7 @@ class SessionStore:
         if not self._db:
             return []
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            return self._db.get_messages_as_conversation(session_id, include_ancestors=True)
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
             return []
