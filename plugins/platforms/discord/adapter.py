@@ -5740,8 +5740,20 @@ class DiscordAdapter(BasePlatformAdapter):
         FENCE = "```"
         segments = content.split(FENCE)
         for idx, seg in enumerate(segments):
-            if idx % 2 == 1:  # inside a fenced code block → keep as text
-                add_text(f"{FENCE}{seg}{FENCE}")
+            if idx % 2 == 1:  # inside a fenced code block
+                # A fence whose entire body is just a markdown table is almost
+                # always a table the agent wrapped for display (real code never
+                # has a bare |---|---| separator line) — image it too. Anything
+                # else stays verbatim code.
+                fenced_tbl = cls._fenced_pure_table(seg)
+                if fenced_tbl is not None:
+                    parts.append({
+                        "type": "table",
+                        "header": fenced_tbl[0],
+                        "rows": fenced_tbl[1],
+                    })
+                else:
+                    add_text(f"{FENCE}{seg}{FENCE}")
                 continue
             lines = seg.split("\n")
             n = len(lines)
@@ -5769,6 +5781,39 @@ class DiscordAdapter(BasePlatformAdapter):
             add_text("\n".join(buf))
 
         return parts or [{"type": "text", "text": content}]
+
+    @classmethod
+    def _fenced_pure_table(cls, seg: str) -> Optional[tuple]:
+        """If a fenced block's body is nothing but a markdown table, return
+        ``(header_line, [data_rows])``; otherwise ``None`` (keep it as code).
+
+        Tolerates an optional single language-tag line (```` ```markdown ````)
+        and surrounding blank lines, but rejects anything with non-table lines
+        so real code is never converted.
+        """
+        lines = seg.split("\n")
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        # Drop an opening language tag (single bare token, no pipe): ```python
+        if (
+            lines
+            and "|" not in lines[0]
+            and re.fullmatch(r"[A-Za-z0-9_.+#-]+", lines[0].strip() or "")
+        ):
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+        if len(lines) < 2:
+            return None
+        if not (
+            cls._looks_like_table_row(lines[0])
+            and cls._looks_like_separator_row(lines[1])
+        ):
+            return None
+        if not all(cls._looks_like_table_row(ln) for ln in lines[2:]):
+            return None
+        return (lines[0], lines[2:])
 
     @staticmethod
     def _hermes_fonts_dir() -> str:
