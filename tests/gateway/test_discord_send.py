@@ -594,8 +594,28 @@ class TestSplitMessageParts:
         assert parts[1]["rows"] == ["| 1 | 2 |"]
         assert parts[2]["text"].strip() == "outtro"
 
-    def test_table_inside_code_fence_stays_text(self):
+    def test_fenced_pure_table_is_imaged(self):
+        # A fence whose whole body is just a table → treated as a table
+        # (the agent commonly wraps tables in ``` for display).
         text = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["table"]
+        assert parts[0]["header"] == "| A | B |"
+
+    def test_fenced_pure_table_with_lang_tag_is_imaged(self):
+        text = "```markdown\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["table"]
+
+    def test_fenced_real_code_stays_text(self):
+        # Code that merely contains a pipe (no |---| separator) stays verbatim.
+        text = "```python\ndef f(x):\n    return x | 1\n```"
+        parts = DiscordAdapter._split_message_parts(text)
+        assert [p["type"] for p in parts] == ["text"]
+        assert "def f(x)" in parts[0]["text"]
+
+    def test_fenced_table_plus_other_lines_stays_text(self):
+        text = "```\n# a note\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
         parts = DiscordAdapter._split_message_parts(text)
         assert [p["type"] for p in parts] == ["text"]
 
