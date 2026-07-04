@@ -165,3 +165,24 @@ def test_load_memory_notifications_normalization(server, monkeypatch, raw, expec
     monkeypatch.setattr(server, "_load_cfg", lambda: {"display": display})
     assert server._load_memory_notifications() == expected
 
+
+def test_load_memory_notifications_platform_override_beats_global(server, monkeypatch):
+    """A per-platform override wins over the global value, matching the
+    messaging gateway. display.platforms.<plat>.memory_notifications=off must
+    silence that platform even when the global default is 'on'."""
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "display": {
+                "memory_notifications": "on",
+                "platforms": {"line": {"memory_notifications": "off"}},
+            }
+        },
+    )
+    # The overridden platform is silenced...
+    assert server._load_memory_notifications("line") == "off"
+    # ...while the default cli surface still follows the global "on".
+    assert server._load_memory_notifications() == "on"
+    assert server._load_memory_notifications("cli") == "on"
+

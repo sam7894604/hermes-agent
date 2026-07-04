@@ -129,6 +129,69 @@ class TestBackwardCompat:
 
 
 # ---------------------------------------------------------------------------
+# memory_notifications: per-platform self-improvement/review push toggle
+# ---------------------------------------------------------------------------
+
+class TestMemoryNotifications:
+    """display.platforms.<plat>.memory_notifications overrides the global value.
+
+    Regression guard for the bug where a platform set to "off" was ignored
+    because gateway/run.py read display.memory_notifications directly instead
+    of resolving per-platform. The platform-explicit value must win.
+    """
+
+    def test_registered_as_overrideable_key(self):
+        """memory_notifications is a canonical per-platform overrideable key."""
+        from gateway.display_config import OVERRIDEABLE_KEYS, _GLOBAL_DEFAULTS
+
+        assert "memory_notifications" in OVERRIDEABLE_KEYS
+        assert _GLOBAL_DEFAULTS["memory_notifications"] == "on"
+
+    def test_platform_off_beats_global_on(self):
+        """The core bug: platform "off" must win over global "on"."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "memory_notifications": "on",
+                "platforms": {
+                    "line": {"memory_notifications": "off"},
+                },
+            }
+        }
+        # LINE silenced, everyone else follows the global "on".
+        assert resolve_display_setting(config, "line", "memory_notifications", "on") == "off"
+        assert resolve_display_setting(config, "telegram", "memory_notifications", "on") == "on"
+
+    def test_platform_false_beats_global_true(self):
+        """YAML bare `false` per-platform still wins over global true."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "memory_notifications": True,
+                "platforms": {"line": {"memory_notifications": False}},
+            }
+        }
+        # resolve returns the raw bool; callers normalize bool→on/off.
+        assert resolve_display_setting(config, "line", "memory_notifications", "on") is False
+        assert resolve_display_setting(config, "discord", "memory_notifications", "on") is True
+
+    def test_global_used_when_no_platform_override(self):
+        """Falls back to the global value when the platform has no override."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"memory_notifications": "verbose"}}
+        assert resolve_display_setting(config, "line", "memory_notifications", "on") == "verbose"
+
+    def test_builtin_default_when_unconfigured(self):
+        """Empty config resolves to the built-in "on" default."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "line", "memory_notifications", "on") == "on"
+
+
+# ---------------------------------------------------------------------------
 # YAML normalisation
 # ---------------------------------------------------------------------------
 
