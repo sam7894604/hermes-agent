@@ -56,8 +56,15 @@ from .dream import (
     DEFAULT_STALENESS_DAYS,
 )
 from .recall import RecallStore
+from .audit import Auditor, AUDIT_LOG_FILENAME
 
 logger = logging.getLogger(__name__)
+
+#: A/B arms (design spike §7). "experiment" = full mem4; "baseline" = provider
+#: loaded but all agent-facing surfaces off (no tools, no injection) so hot-zone
+#: cost matches pure built-in while the recall store can still be measured.
+ARM_EXPERIMENT = "experiment"
+ARM_BASELINE = "baseline"
 
 #: Default cap on characters injected by prefetch() (design spike / Fable 5 §2).
 DEFAULT_PREFETCH_CAP = 2000
@@ -172,6 +179,9 @@ class Mem4MemoryProvider(MemoryProvider):
         # reader; tests inject a fake. See set_backfill_source().
         self._backfill_source: Optional[Callable[[int, int], Iterable[Tuple[int, str, str, float]]]] = None
         self._backfill_thread: Optional[threading.Thread] = None
+        # ② Auditor + A/B arm
+        self._auditor: Optional[Auditor] = None
+        self._arm = ARM_EXPERIMENT
 
     # -- identity ------------------------------------------------------------
 
@@ -234,6 +244,13 @@ class Mem4MemoryProvider(MemoryProvider):
                 self._backend.attach_recall(self._recall)
             self._index_microfiles()
             self._start_backfill()
+            # ② Auditor + A/B arm
+            self._arm = self._resolve_arm()
+            self._auditor = Auditor(
+                self._root / AUDIT_LOG_FILENAME,
+                enabled=self._resolve_audit_enabled(),
+                arm=self._arm, session_id=session_id,
+            )
             self._dream = self._build_dream()
             self._active = True
             logger.info(
@@ -287,6 +304,45 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception:
             pass
         return DEFAULT_PREFETCH_CAP
+
+    def _resolve_arm(self) -> str:
+        """Resolve the A/B arm (memory.mem4.arm). Default experiment."""
+        val = None
+        if self._config and self._config.get("arm"):
+            val = str(self._config["arm"])
+        else:
+            try:
+                from hermes_cli.config import load_config
+
+                config = load_config()
+                memory = config.get("memory", {}) if isinstance(config, dict) else {}
+                m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+                if isinstance(m4, dict) and m4.get("arm"):
+                    val = str(m4["arm"])
+            except Exception:
+                pass
+        return ARM_BASELINE if (val or "").strip().lower() == ARM_BASELINE else ARM_EXPERIMENT
+
+    def _resolve_audit_enabled(self) -> bool:
+        """Resolve memory.mem4.audit.enabled. Default False (opt-in)."""
+        override = (self._config or {}).get("audit") if self._config else None
+        if isinstance(override, dict) and "enabled" in override:
+            return _coerce_bool(override.get("enabled"), False)
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            audit = m4.get("audit", {}) if isinstance(m4, dict) else {}
+            if isinstance(audit, dict) and "enabled" in audit:
+                return _coerce_bool(audit.get("enabled"), False)
+        except Exception:
+            pass
+        return False
+
+    def _is_baseline(self) -> bool:
+        return self._arm == ARM_BASELINE
 
     # -- idempotent init / migration (design spike §10) ----------------------
 
@@ -497,8 +553,13 @@ class Mem4MemoryProvider(MemoryProvider):
     # -- tools ---------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        # ① is live: mem_search is now backed by the FTS5 recall store, so it is
-        # advertised alongside mem_route.
+        # A/B baseline arm hides all tools so the model can't augment — the
+        # hot-zone + tool surface matches pure built-in (design spike §7). The
+        # recall store still exists for offline measurement via the harness.
+        if self._is_baseline():
+            return []
+        # ① is live: mem_search is backed by the FTS5 recall store, advertised
+        # alongside mem_route.
         return [MEM_ROUTE_SCHEMA, MEM_SEARCH_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
@@ -523,12 +584,16 @@ class Mem4MemoryProvider(MemoryProvider):
             return tool_error(f"invalid route code: {code!r}")
         result = self._backend.read_microfile(norm)
         if result is None:
+            if self._auditor is not None:
+                self._auditor.record_route(norm, hit=False, injected_chars=0)
             # Graceful miss: never an error — the built-in L0 is still there.
             return json.dumps(
                 {"code": norm, "found": False,
                  "result": f"[mem4 miss: no microfile '{norm}' — built-in memory remains authoritative]"},
                 ensure_ascii=False,
             )
+        if self._auditor is not None:
+            self._auditor.record_route(norm, hit=True, injected_chars=len(result.content))
         return json.dumps(
             {"code": norm, "found": True, "source": result.source,
              "stale": result.stale, "result": result.render()},
@@ -547,6 +612,11 @@ class Mem4MemoryProvider(MemoryProvider):
             limit = 5
         limit = max(1, min(limit, 20))
         hits = self._recall.search(query, limit=limit, now=time.time())
+        if self._auditor is not None:
+            self._auditor.record_search(
+                query, route=(hits[0].route if hits else ""),
+                hit=bool(hits), injected_chars=sum(len(h.snippet) for h in hits),
+            )
         payload = {
             "query": query,
             "hits": [
@@ -569,7 +639,8 @@ class Mem4MemoryProvider(MemoryProvider):
         local SQLite recall store and local files. The injected text is capped at
         ``self._prefetch_cap`` characters to bound token cost.
         """
-        if not self._active or self._recall is None:
+        # Baseline arm injects nothing (design spike §7 A/B).
+        if not self._active or self._recall is None or self._is_baseline():
             return ""
         if not query or len(query.strip()) < _MIN_INDEX_LEN:
             return ""
@@ -579,6 +650,8 @@ class Mem4MemoryProvider(MemoryProvider):
             logger.debug("mem4 prefetch failed (non-fatal): %s", e)
             return ""
         if not hits:
+            if self._auditor is not None:
+                self._auditor.record_prefetch(query.strip(), injected_chars=0)
             return ""
         lines = ["## mem4 recall"]
         for h in hits:
@@ -588,6 +661,8 @@ class Mem4MemoryProvider(MemoryProvider):
             suffix = " …[truncated]"
             keep = max(0, self._prefetch_cap - len(suffix))
             text = text[:keep].rstrip() + suffix
+        if self._auditor is not None:
+            self._auditor.record_prefetch(query.strip(), injected_chars=len(text))
         return text
 
     # -- ① recall: sync_turn (filtered, deduped indexing) --------------------
@@ -655,7 +730,7 @@ class Mem4MemoryProvider(MemoryProvider):
     # -- system prompt / compression -----------------------------------------
 
     def system_prompt_block(self) -> str:
-        if not self._active:
+        if not self._active or self._is_baseline():
             return ""
         # Deliberately tiny: do NOT re-inject L0 (built-in already loaded
         # MEMORY.md). Just the routing legend so the model knows mem_route

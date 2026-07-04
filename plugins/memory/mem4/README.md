@@ -122,7 +122,51 @@ Clears and rebuilds the recall index from the source-of-truth files (microfiles
 built-in memory files for writing. This is the fifth non-negotiable guarantee
 (Fable 5 review §5): the recall index / derived layers can always be rebuilt.
 
+## ② Auditor + A/B measurement
+
+Value is measured with data, not estimates (design spike §7; Fable 5 §6).
+
+**Auditor** (`audit.py`) — enable with `memory.mem4.audit.enabled: true`. Records
+one JSONL line per recall/route/prefetch event to `$HERMES_HOME/mem4/audit.jsonl`
+(query, hit/miss, route fts/trigram/like, injected chars, prefetch). A tool-call
+miss is *precise*; the L0-hit rate (turns using no tool) is *estimated* offline.
+`Auditor.export_to_baserow(writer, ...)` writes an **aggregate** row to Baserow
+907 via an injected writer (never imports the MCP; tests pass a mock).
+
+> **Baserow 907 schema note.** Table 907 (`memory_audit`) is aggregate-oriented
+> (`type`, `entry_count`, `mem_chars`, `hot_hit_rate`, `est_tokens_saved`,
+> `notes`). The aggregate export uses only those existing columns. Per-event
+> logging would need new columns — see `audit.MISSING_907_FIELDS`. **Adding them
+> is a schema change and is left to the operator** (the code does not alter 907).
+
+**A/B arm** — `memory.mem4.arm: experiment|baseline`. In `baseline`, mem4 is
+loaded but all agent-facing surfaces are off (no tools, no system-prompt legend,
+no prefetch injection), so the hot-zone/tool surface matches pure built-in while
+the recall store stays measurable. Running one A/B round:
+
+1. Set `memory.mem4.arm: baseline` (or remove `memory.provider: mem4`
+   entirely), run the workload, collect `audit.jsonl`.
+2. Set `memory.mem4.arm: experiment`, run the same workload, collect again.
+3. Compare grouped by `arm` (each event line carries its arm).
+
+**QA harness** (`eval/harness.py`, fixture `eval/qa_fixture.json` — 24 items,
+EN+ZH, exact + paraphrase). Deterministic recall eval with no model in the loop,
+so it avoids the "B has extra tools" confound (Fable 5 §3). Run:
+
+```
+hermes mem4 eval
+```
+
+Reports recall accuracy (overall / en / zh / exact / paraphrase), route
+distribution, injected chars, and the **gate** (design spike §7): SHIP if the
+experiment recalls cold knowledge the baseline can't (Δ ≥ 30%), the resident hot
+zone shrank, and net per-query chars improved — else ROLL BACK.
+
+> Runs on **synthetic** fixture data. Real hit rates require deploying to
+> toothless and collecting actual usage; the same harness + `audit.jsonl` then
+> run against real data.
+
 ## Deferred
 
 - **Backends (a) remote-vault / (c) local-vault** — reserved topologies.
-- **② Auditor** — hit/miss + rephrase-miss + route-path measurement to Baserow.
+- **Real-data measurement** — deploy to toothless + collect usage (operator-gated).

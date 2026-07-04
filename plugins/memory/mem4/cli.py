@@ -25,6 +25,12 @@ def cmd_rebuild(args) -> None:
     print(f"  total recall docs:           {result.get('recall_docs', 0)}\n")
 
 
+def cmd_eval(args) -> None:
+    from plugins.memory.mem4.eval.harness import run_ab, format_report
+
+    print(format_report(run_ab()))
+
+
 def register_cli(subparser) -> None:
     """Add mem4 subcommands to the ``hermes mem4`` parser."""
     sub = subparser.add_subparsers(dest="mem4_cmd")
@@ -33,10 +39,16 @@ def register_cli(subparser) -> None:
         help="Rebuild mem4's FTS5 recall index from source files (non-destructive).",
     )
     rebuild_p.set_defaults(func=cmd_rebuild)
+    eval_p = sub.add_parser(
+        "eval",
+        help="Run the recall A/B harness on the synthetic QA fixture (② measurement).",
+    )
+    eval_p.set_defaults(func=cmd_eval)
 
 
 def mem4_command(args) -> None:
     """Default handler when ``hermes mem4`` is run with no subcommand."""
     if getattr(args, "mem4_cmd", None) is None:
         print("\nmem4 — four-tier routed memory provider\n")
-        print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files\n")
+        print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files")
+        print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)\n")

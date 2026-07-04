@@ -114,15 +114,21 @@ def _count_cjk(text: str) -> int:
     return n
 
 
-def _quote_fts(query: str) -> str:
-    """Quote each non-operator token so FTS5 special chars can't break MATCH."""
+def _fts_match(query: str) -> str:
+    """Build an OR-of-quoted-tokens FTS5 MATCH string.
+
+    mem4 recall queries are formed by the model / harness in natural language, so
+    ANY matching token should surface the doc (BM25 then ranks by how well it
+    matches). Implicit AND (every token must appear) would miss almost every
+    natural-language query. Each token is quoted so FTS5 special chars can't
+    break MATCH; boolean operators are not exposed to mem4 recall.
+    """
     parts = []
     for tok in query.split():
-        if tok.upper() in _FTS_OPERATORS:
-            parts.append(tok)
-        else:
-            parts.append('"' + tok.replace('"', '""') + '"')
-    return " ".join(parts)
+        t = tok.strip()
+        if t:
+            parts.append('"' + t.replace('"', '""') + '"')
+    return " OR ".join(parts)
 
 
 @dataclass
@@ -208,7 +214,7 @@ class RecallStore:
 
     def _route_and_fetch(self, q: str, pool: int) -> Tuple[List[_Row], str]:
         if not _contains_cjk(q):
-            return self._fts_fetch("docs_fts", _quote_fts(q), pool), "fts"
+            return self._fts_fetch("docs_fts", _fts_match(q), pool), "fts"
 
         raw = q.strip('"').strip()
         cjk_count = _count_cjk(raw)
@@ -219,7 +225,7 @@ class RecallStore:
         any_short_cjk = any(_count_cjk(t) < 3 for t in tokens_for_check)
 
         if cjk_count >= 3 and not any_short_cjk and self.trigram_available:
-            rows = self._fts_fetch("docs_fts_trigram", _quote_fts(raw), pool)
+            rows = self._fts_fetch("docs_fts_trigram", _fts_match(raw), pool)
             if rows:
                 return rows, "trigram"
             # trigram matched nothing → try LIKE as a safety net
