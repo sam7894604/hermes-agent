@@ -17597,7 +17597,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             #   off     — no chat notification (still logged to stdout)
             #   on      — generic "💾 Memory updated" (default)
             #   verbose — content preview: "💾 Memory ➕ Hermes Repo..."
-            _mem_notif = user_config.get("display", {}).get("memory_notifications")
+            # Resolved per-platform: display.platforms.<platform>.memory_notifications
+            # wins over the global display.memory_notifications, so a platform can
+            # silence these ("off") even when the global default is "on".
+            _mem_notif = resolve_display_setting(
+                user_config, platform_key, "memory_notifications", "on"
+            )
             if isinstance(_mem_notif, bool):
                 _mem_notif = "on" if _mem_notif else "off"
             agent.memory_notifications = str(_mem_notif).lower() if _mem_notif else "on"
