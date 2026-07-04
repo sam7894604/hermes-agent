@@ -149,22 +149,34 @@ the recall store stays measurable. Running one A/B round:
 2. Set `memory.mem4.arm: experiment`, run the same workload, collect again.
 3. Compare grouped by `arm` (each event line carries its arm).
 
-**QA harness** (`eval/harness.py`, fixture `eval/qa_fixture.json` — 24 items,
-EN+ZH, exact + paraphrase). Deterministic recall eval with no model in the loop,
-so it avoids the "B has extra tools" confound (Fable 5 §3). Run:
+**Controlled measurement** (`eval/harness.py`) — three layers, so results aren't
+confounded by real-traffic randomness. Reports **distributions** (min/median/max),
+not single numbers. Run `hermes mem4 eval`.
 
-```
-hermes mem4 eval
-```
+1. **Deterministic offline replay** (primary, zero randomness) — the same fixed
+   input set is replayed against baseline (built-in) and mem4; same input ⇒
+   any difference is mem4's. Per item: gold hit (**PRECISE**), injected tokens
+   (**PRECISE**), route. Input = the QA fixture (`qa_fixture.json`, 24 items,
+   EN+ZH, exact+paraphrase, gold answers) + an injectable "sampled from real
+   session history" set (`history_samples.json` synthetic stand-in;
+   `load_history_samples(source=...)` wires a real sampler at deploy time).
+2. **Paired counterfactual** (real traffic, paired) — the Auditor records, per
+   query, both `baseline_inject_tokens` (what pure built-in would inject) and
+   `mem4_inject_tokens` (what mem4 actually injected); the harness reports the
+   paired-difference distribution — robust to traffic mix.
+3. **Resident cost** (context-independent) — session-open injection size:
+   baseline (whole MEMORY.md) vs mem4 (short legend), across N sessions.
 
-Reports recall accuracy (overall / en / zh / exact / paraphrase), route
-distribution, injected chars, and the **gate** (design spike §7): SHIP if the
-experiment recalls cold knowledge the baseline can't (Δ ≥ 30%), the resident hot
-zone shrank, and net per-query chars improved — else ROLL BACK.
+**Gate** (design spike §7, hard-wired): SHIP iff mem4 recalls cold knowledge the
+baseline can't (gold Δ ≥ 30%), net per-query tokens shrank, and the resident hot
+zone shrank — else ROLL BACK. `gate()` prints PASS/FAIL per criterion.
 
-> Runs on **synthetic** fixture data. Real hit rates require deploying to
-> toothless and collecting actual usage; the same harness + `audit.jsonl` then
-> run against real data.
+**Honesty:** deterministic-replay gold hits are PRECISE; free real-traffic "true
+hits" can only be ESTIMATED and are labelled as such.
+
+> Runs on **synthetic/fixture** data — mechanism proof only. Real hit rates
+> require deploying to toothless and collecting actual usage; the same harness +
+> `audit.jsonl` then run against real data.
 
 ## Deferred
 

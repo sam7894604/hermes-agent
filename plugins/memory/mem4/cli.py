@@ -26,9 +26,9 @@ def cmd_rebuild(args) -> None:
 
 
 def cmd_eval(args) -> None:
-    from plugins.memory.mem4.eval.harness import run_ab, format_report
+    from plugins.memory.mem4.eval.harness import run_all, format_full_report
 
-    print(format_report(run_ab()))
+    print(format_full_report(run_all()))
 
 
 def register_cli(subparser) -> None:

@@ -31,18 +31,28 @@ from typing import Any, Callable, Dict, List, Optional
 
 AUDIT_LOG_FILENAME = "audit.jsonl"
 
-# Per-event fields that table 907 does NOT currently have (it is aggregate-
-# oriented). Listed here so the user can decide whether to add them for richer
-# per-event logging; the code does NOT change the schema on its own.
+# Table 907 (memory_audit) is AGGREGATE-oriented. Its existing columns can hold
+# a rolled-up summary row (type=audit, entry_count, mem_chars, hot_hit_rate,
+# est_tokens_saved, notes). But the controlled measurement (② three layers) wants
+# to persist richer, per-event / paired / distribution data that 907 has no
+# columns for. Listed so the operator can decide whether to add them — the code
+# does NOT alter the 907 schema on its own (aggregate export uses only existing
+# columns; everything else can be packed into `notes` JSON as a fallback).
 MISSING_907_FIELDS = [
+    # per-event (layer 2 paired counterfactual)
     "query (text)",
     "arm (single_select: baseline/experiment)",
     "route (single_select: fts/trigram/like/microfile)",
     "hit (boolean) / hit_estimated (boolean)",
-    "prefetch_triggered (boolean) / prefetch_chars (number)",
-    "injected_tokens (number)",
-    "session_id (text)",
     "tool_called (single_select: mem_route/mem_search/none)",
+    "session_id (text)",
+    "baseline_inject_tokens (number)  — what pure built-in would inject",
+    "mem4_inject_tokens (number)      — what mem4 actually injected",
+    "paired_diff_tokens (number)      — baseline − mem4 (per query)",
+    # distributions (layers 1 & 3) — 907 has no distribution columns
+    "inject_tokens_p25/median/p75/min/max (number ×5)",
+    "resident_tokens_baseline_vs_mem4 (number ×2)",
+    "gold_accuracy_precise (number)   — deterministic-replay gold hit rate",
 ]
 
 
@@ -64,6 +74,12 @@ class AuditEvent:
     route: str               # "fts"|"trigram"|"like"|"microfile"|""
     injected_chars: int
     prefetch_triggered: bool = False
+    # Paired counterfactual (② layer 2): what pure built-in WOULD inject on this
+    # turn (its whole resident memory) vs what mem4 actually injected (legend +
+    # this query's recall). Paired per-query so a paired-difference statistic
+    # can be computed regardless of traffic mix.
+    baseline_inject_tokens: int = 0
+    mem4_inject_tokens: int = 0
 
     def to_line(self) -> str:
         d = asdict(self)
@@ -94,11 +110,13 @@ class Auditor:
         except OSError:
             pass  # instrumentation must never break a turn
 
-    def record_search(self, query: str, *, route: str, hit: bool, injected_chars: int) -> None:
+    def record_search(self, query: str, *, route: str, hit: bool, injected_chars: int,
+                      baseline_inject_tokens: int = 0, mem4_inject_tokens: int = 0) -> None:
         self._emit(AuditEvent(
             ts=time.time(), session_id=self.session_id, arm=self.arm, kind="search",
             query=query[:500], tool_called="mem_search", hit=hit, hit_estimated=False,
             route=route, injected_chars=injected_chars,
+            baseline_inject_tokens=baseline_inject_tokens, mem4_inject_tokens=mem4_inject_tokens,
         ))
 
     def record_route(self, code: str, *, hit: bool, injected_chars: int) -> None:
@@ -108,11 +126,13 @@ class Auditor:
             route="microfile" if hit else "", injected_chars=injected_chars,
         ))
 
-    def record_prefetch(self, query: str, *, injected_chars: int) -> None:
+    def record_prefetch(self, query: str, *, injected_chars: int,
+                        baseline_inject_tokens: int = 0, mem4_inject_tokens: int = 0) -> None:
         self._emit(AuditEvent(
             ts=time.time(), session_id=self.session_id, arm=self.arm, kind="prefetch",
             query=query[:500], tool_called="", hit=injected_chars > 0, hit_estimated=False,
             route="", injected_chars=injected_chars, prefetch_triggered=injected_chars > 0,
+            baseline_inject_tokens=baseline_inject_tokens, mem4_inject_tokens=mem4_inject_tokens,
         ))
 
     # -- reading / summarizing -----------------------------------------------

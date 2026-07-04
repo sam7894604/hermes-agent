@@ -4,7 +4,10 @@ import json
 
 from plugins.memory.mem4 import Mem4MemoryProvider
 from plugins.memory.mem4.audit import Auditor, estimate_tokens
-from plugins.memory.mem4.eval.harness import run_ab, load_fixture, evaluate_gate
+from plugins.memory.mem4.eval.harness import (
+    run_all, load_fixture, load_history_samples, gate, dist,
+    deterministic_replay, paired_counterfactual, resident_cost,
+)
 
 
 def _audit_provider(tmp_path, arm="experiment"):
@@ -130,21 +133,100 @@ def test_fixture_has_enough_items_incl_paraphrase_and_cjk():
     assert any(it["lang"] == "en" for it in items)
 
 
-def test_harness_ab_experiment_beats_baseline():
-    ab = run_ab()
-    assert ab["baseline"]["accuracy"] == 0.0          # cold knowledge, no recall
-    assert ab["experiment"]["accuracy"] > 0.5         # FTS5 recalls most exact-term
-    # All three routes exercised by the fixture.
-    dist = ab["experiment"]["route_distribution"]
-    assert set(dist).issuperset({"fts", "trigram", "like"})
-    assert ab["gate"]["passed"] is True
-    assert ab["gate"]["recall_win"] > 0.3
+def test_history_samples_loadable_and_injectable():
+    # Default synthetic file.
+    assert len(load_history_samples()) >= 5
+    # Injectable source overrides the file.
+    injected = [{"id": "x", "lang": "en", "paraphrase": False,
+                 "query": "q", "knowledge": "k", "expect_substr": "k"}]
+    assert load_history_samples(source=lambda: injected) == injected
 
 
-def test_gate_rolls_back_when_no_recall_advantage():
-    # Construct reports where experiment has no recall edge → gate must fail.
-    base = {"accuracy": 0.0, "avg_injected_chars": 0.0}
-    exp = {"accuracy": 0.05, "avg_injected_chars": 50.0}
-    gate = evaluate_gate(base, exp, baseline_hot_chars=1000, experiment_hot_chars=260)
-    assert gate["passed"] is False
-    assert "ROLL BACK" in gate["verdict"]
+def test_dist_reports_distribution_not_single_number():
+    d = dist([10, 20, 30, 40])
+    assert d["n"] == 4 and d["min"] == 10.0 and d["max"] == 40.0
+    assert d["median"] == 25.0
+    assert "p25" in d and "p75" in d
+
+
+# -- Layer 1: deterministic replay -------------------------------------------
+
+def test_layer1_deterministic_replay_precise_and_mem4_beats_baseline():
+    r = deterministic_replay(load_fixture())
+    assert "PRECISE" in r["precision"]
+    assert r["gold_accuracy_baseline"] == 0.0     # cold knowledge, no recall
+    assert r["gold_accuracy_mem4"] > 0.5
+    assert set(r["route_distribution"]).issuperset({"fts", "trigram", "like"})
+    # mem4 injects far fewer tokens per query than a flat resident MEMORY.md.
+    assert r["inject_tokens_mem4"]["median"] < r["inject_tokens_baseline"]["median"]
+
+
+def test_layer1_is_deterministic():
+    a = deterministic_replay(load_fixture())
+    b = deterministic_replay(load_fixture())
+    assert a["gold_accuracy_mem4"] == b["gold_accuracy_mem4"]
+    assert a["route_distribution"] == b["route_distribution"]
+
+
+# -- Layer 2: paired counterfactual ------------------------------------------
+
+def test_layer2_paired_counterfactual_from_events():
+    events = [
+        {"kind": "search", "baseline_inject_tokens": 500, "mem4_inject_tokens": 90},
+        {"kind": "search", "baseline_inject_tokens": 500, "mem4_inject_tokens": 120},
+        {"kind": "prefetch", "baseline_inject_tokens": 500, "mem4_inject_tokens": 70},
+    ]
+    p = paired_counterfactual(events)
+    assert p["n"] == 3
+    assert p["paired_diff_tokens"]["median"] > 0     # mem4 cheaper
+    assert p["mem4_cheaper_fraction"] == 1.0
+
+
+def test_layer2_provider_records_paired_tokens(tmp_path):
+    # A resident built-in memory exists → baseline_inject_tokens > 0.
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "MEMORY.md").write_text("X" * 2000, encoding="utf-8")
+    p = _audit_provider(tmp_path)
+    p.initialize("s1", hermes_home=str(tmp_path))
+    p.sync_turn("the recall database file is recall.db under mem4", "ok")
+    p.handle_tool_call("mem_search", {"query": "recall.db mem4"})
+    ev = [e for e in p._auditor.read_events() if e["kind"] == "search"][0]
+    assert ev["baseline_inject_tokens"] > 0
+    assert ev["mem4_inject_tokens"] > 0
+    assert ev["baseline_inject_tokens"] > ev["mem4_inject_tokens"]  # mem4 cheaper
+    p.shutdown()
+
+
+# -- Layer 3: resident cost --------------------------------------------------
+
+def test_layer3_resident_cost_reduction():
+    res = resident_cost([1500, 1800, 2175, 2400, 2600], mem4_legend_chars=280)
+    assert res["baseline_resident_tokens"]["median"] > res["mem4_resident_tokens"]["median"]
+    assert res["median_reduction_fraction"] > 0.5
+
+
+# -- Gate --------------------------------------------------------------------
+
+def test_run_all_gate_ships_on_fixture():
+    report = run_all()
+    g = report["gate"]
+    assert g["passed"] is True
+    assert g["recall_win"] > 0.3
+    # All three layers present.
+    assert report["layer1_replay_fixture"]["n"] >= 20
+    assert report["layer3_resident"]["median_reduction_fraction"] > 0
+
+
+def test_gate_rolls_back_without_recall_advantage():
+    replay = {
+        "gold_accuracy_mem4": 0.05, "gold_accuracy_baseline": 0.0,
+        "inject_tokens_mem4": {"median": 90}, "inject_tokens_baseline": {"median": 500},
+    }
+    resident = {
+        "mem4_resident_tokens": {"median": 70}, "baseline_resident_tokens": {"median": 500},
+        "median_reduction_fraction": 0.86,
+    }
+    g = gate(replay, resident)
+    assert g["passed"] is False               # recall win below threshold
+    assert "ROLL BACK" in g["verdict"]

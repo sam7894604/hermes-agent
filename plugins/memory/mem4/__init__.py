@@ -132,6 +132,17 @@ MEM_ROUTE_SCHEMA = {
     },
 }
 
+#: The tiny always-resident routing legend (system_prompt_block). Kept as a
+#: module constant so its size can be measured for the ② resident-cost metric.
+ROUTING_LEGEND = (
+    "# mem4 記憶路由（補強層）\n"
+    "內建 MEMORY.md/USER.md 為權威 L0；mem4 提供按需的冷區微檔讀取與召回。\n"
+    "路由碼：§sys 系統/環境 · §fam 人物/家庭 · §vlt vault/知識 · "
+    "§adr 架構決策 · §proto 協定/流程。\n"
+    "L0 缺該細節時：用 mem_route(code) 讀對應微檔；"
+    "用 mem_search(query) 全文召回舊對話/冷知識（支援中文）。"
+)
+
 MEM_SEARCH_SCHEMA = {
     "name": "mem_search",
     "description": (
@@ -179,9 +190,11 @@ class Mem4MemoryProvider(MemoryProvider):
         # reader; tests inject a fake. See set_backfill_source().
         self._backfill_source: Optional[Callable[[int, int], Iterable[Tuple[int, str, str, float]]]] = None
         self._backfill_thread: Optional[threading.Thread] = None
-        # ② Auditor + A/B arm
+        # ② Auditor + A/B arm + measurement baselines
         self._auditor: Optional[Auditor] = None
         self._arm = ARM_EXPERIMENT
+        self._builtin_chars = 0   # resident built-in memory size (MEMORY.md+USER.md)
+        self._legend_chars = len(ROUTING_LEGEND)
 
     # -- identity ------------------------------------------------------------
 
@@ -244,8 +257,10 @@ class Mem4MemoryProvider(MemoryProvider):
                 self._backend.attach_recall(self._recall)
             self._index_microfiles()
             self._start_backfill()
-            # ② Auditor + A/B arm
+            # ② Auditor + A/B arm + measurement baselines
             self._arm = self._resolve_arm()
+            self._builtin_chars = self._read_builtin_memory_chars(hermes_home)
+            self._legend_chars = len(ROUTING_LEGEND)
             self._auditor = Auditor(
                 self._root / AUDIT_LOG_FILENAME,
                 enabled=self._resolve_audit_enabled(),
@@ -343,6 +358,36 @@ class Mem4MemoryProvider(MemoryProvider):
 
     def _is_baseline(self) -> bool:
         return self._arm == ARM_BASELINE
+
+    @staticmethod
+    def _read_builtin_memory_chars(hermes_home) -> int:
+        """Total chars of the resident built-in memory (MEMORY.md + USER.md).
+
+        This is what pure built-in injects on EVERY turn — the baseline side of
+        the paired counterfactual (② layer 2) and the resident-cost metric
+        (② layer 3). Read-only; never writes the built-in files.
+        """
+        total = 0
+        mem_dir = Path(hermes_home) / "memories"
+        for fname in ("MEMORY.md", "USER.md"):
+            p = mem_dir / fname
+            if p.is_file():
+                try:
+                    total += len(p.read_text(encoding="utf-8"))
+                except OSError:
+                    pass
+        return total
+
+    def _paired_tokens(self, recall_chars: int) -> Tuple[int, int]:
+        """(baseline_inject_tokens, mem4_inject_tokens) for one query.
+
+        Built-in injects its whole resident memory every turn; mem4 injects the
+        small legend plus this query's recall. Paired per-query (② layer 2).
+        """
+        from .audit import estimate_tokens
+        baseline = estimate_tokens(self._builtin_chars)
+        mem4 = estimate_tokens(self._legend_chars + max(0, recall_chars))
+        return baseline, mem4
 
     # -- idempotent init / migration (design spike §10) ----------------------
 
@@ -613,9 +658,12 @@ class Mem4MemoryProvider(MemoryProvider):
         limit = max(1, min(limit, 20))
         hits = self._recall.search(query, limit=limit, now=time.time())
         if self._auditor is not None:
+            _rc = sum(len(h.snippet) for h in hits)
+            _base_tok, _mem4_tok = self._paired_tokens(_rc)
             self._auditor.record_search(
                 query, route=(hits[0].route if hits else ""),
-                hit=bool(hits), injected_chars=sum(len(h.snippet) for h in hits),
+                hit=bool(hits), injected_chars=_rc,
+                baseline_inject_tokens=_base_tok, mem4_inject_tokens=_mem4_tok,
             )
         payload = {
             "query": query,
@@ -651,7 +699,11 @@ class Mem4MemoryProvider(MemoryProvider):
             return ""
         if not hits:
             if self._auditor is not None:
-                self._auditor.record_prefetch(query.strip(), injected_chars=0)
+                _b, _m = self._paired_tokens(0)
+                self._auditor.record_prefetch(
+                    query.strip(), injected_chars=0,
+                    baseline_inject_tokens=_b, mem4_inject_tokens=_m,
+                )
             return ""
         lines = ["## mem4 recall"]
         for h in hits:
@@ -662,7 +714,11 @@ class Mem4MemoryProvider(MemoryProvider):
             keep = max(0, self._prefetch_cap - len(suffix))
             text = text[:keep].rstrip() + suffix
         if self._auditor is not None:
-            self._auditor.record_prefetch(query.strip(), injected_chars=len(text))
+            _b, _m = self._paired_tokens(len(text))
+            self._auditor.record_prefetch(
+                query.strip(), injected_chars=len(text),
+                baseline_inject_tokens=_b, mem4_inject_tokens=_m,
+            )
         return text
 
     # -- ① recall: sync_turn (filtered, deduped indexing) --------------------
@@ -735,14 +791,7 @@ class Mem4MemoryProvider(MemoryProvider):
         # Deliberately tiny: do NOT re-inject L0 (built-in already loaded
         # MEMORY.md). Just the routing legend so the model knows mem_route
         # exists and what the codes mean (design spike §2).
-        return (
-            "# mem4 記憶路由（補強層）\n"
-            "內建 MEMORY.md/USER.md 為權威 L0；mem4 提供按需的冷區微檔讀取與召回。\n"
-            "路由碼：§sys 系統/環境 · §fam 人物/家庭 · §vlt vault/知識 · "
-            "§adr 架構決策 · §proto 協定/流程。\n"
-            "L0 缺該細節時：用 mem_route(code) 讀對應微檔；"
-            "用 mem_search(query) 全文召回舊對話/冷知識（支援中文）。"
-        )
+        return ROUTING_LEGEND
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         # Feed the routing legend (and available codes) into the compression
