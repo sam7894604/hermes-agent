@@ -53,6 +53,12 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
     "cleanup_progress": False,
+    # Background self-improvement review / memory-update notifications surfaced
+    # in chat: "off" (silent, still logged) | "on" (default) | "verbose".
+    # Registered here so it participates in per-platform resolution
+    # (display.platforms.<platform>.memory_notifications) and is accepted as a
+    # canonical overrideable key.
+    "memory_notifications": "on",
 }
 
 # ---------------------------------------------------------------------------
