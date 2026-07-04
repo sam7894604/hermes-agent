@@ -628,15 +628,21 @@ def compress_context(
             except Exception as _rel_err:
                 logger.debug("compression lock release failed: %s", _rel_err)
 
-    # Notify external memory provider before compression discards context
+    # Notify external memory provider before compression discards context.
+    # Capture the returned text (provider-extracted insights — e.g. mem4's
+    # routing legend + relevant cold-tier summaries) so it can be injected into
+    # the compaction summary. Previously the return value was discarded, so the
+    # on_pre_compress hook ran but its output went nowhere (upstream issue
+    # #23367). Resolved defensively: a provider failure never blocks compaction.
+    _pre_compress_ctx = ""
     if agent._memory_manager:
         try:
-            agent._memory_manager.on_pre_compress(messages)
+            _pre_compress_ctx = agent._memory_manager.on_pre_compress(messages) or ""
         except Exception:
-            pass
+            _pre_compress_ctx = ""
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force, provider_context=_pre_compress_ctx)
     except TypeError:
         # Plugin context engine with strict signature that doesn't accept
         # focus_topic / force — fall back to calling without them.
