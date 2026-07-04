@@ -15,9 +15,12 @@ This module is the ⑤-minimal *chassis*. It implements:
     built-in files)
   * a switchable storage backend, defaulting to local-file (see backend.py)
 
-Deferred (stubs / not wired) to keep this a single-feature commit:
+Feature ④ (Dream consolidation) is wired in via dream.py — event/threshold +
+session-boundary staleness triggers over mem4-owned L2/L3, fully in-provider
+with no external cron dependency. See dream.py and the README deployment note.
+
+Deferred (stubs / not wired) to keep scope tight:
   * feature ① — ``prefetch`` / ``sync_turn`` / FTS5 recall + backfill
-  * feature ④ — Dream consolidation via ``on_session_end``
 
 See design spike: 技術/架構決策/2026-07-04_四層記憶包裝為Hermes-Provider設計spike.md
 """
@@ -41,8 +44,30 @@ from .backend import (
     build_backend,
     normalize_code,
 )
+from .dream import (
+    DreamProcessor,
+    DEFAULT_ENABLED,
+    DEFAULT_THRESHOLD,
+    DEFAULT_STALENESS_DAYS,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 #: State-marker schema version (design spike §10.1). Bump when the on-disk
 #: layout changes; ``_migrate`` walks from the stored version up to this.
@@ -105,6 +130,7 @@ class Mem4MemoryProvider(MemoryProvider):
         self._active = False
         self._ran_migration = False
         self._state: Dict[str, Any] = {}
+        self._dream: Optional[DreamProcessor] = None
 
     # -- identity ------------------------------------------------------------
 
@@ -158,15 +184,25 @@ class Mem4MemoryProvider(MemoryProvider):
         try:
             self._ran_migration = self._ensure_bootstrap()
             self._backfill()  # stub in ⑤-minimal (design spike §10.4 → feature ①)
+            self._dream = self._build_dream()
             self._active = True
             logger.info(
-                "mem4 active (backend=%s, microfiles=%d, migration_ran=%s)",
+                "mem4 active (backend=%s, microfiles=%d, migration_ran=%s, dream=%s)",
                 kind, self._state.get("counts", {}).get("microfiles", 0),
-                self._ran_migration,
+                self._ran_migration, self._dream.enabled if self._dream else False,
             )
         except Exception as e:
             logger.warning("mem4 initialize failed — provider inactive: %s", e)
             self._active = False
+            return
+
+        # ④ Dream — session-start staleness floor: consolidate if overdue (and
+        # there is pending signal). Non-fatal; never blocks the turn.
+        if self._dream:
+            try:
+                self._dream.maybe_consolidate("session_start")
+            except Exception as e:
+                logger.debug("mem4 dream (session_start) failed (non-fatal): %s", e)
 
     def shutdown(self) -> None:
         # No background threads in ⑤-minimal; nothing to flush.
@@ -236,6 +272,62 @@ class Mem4MemoryProvider(MemoryProvider):
             )
         self._write_state(state)
         return state
+
+    # -- ④ Dream config / construction ---------------------------------------
+
+    def _resolve_dream_config(self) -> Dict[str, Any]:
+        """Resolve memory.mem4.dream.{enabled,threshold,staleness_days}."""
+        enabled, threshold, staleness = (
+            DEFAULT_ENABLED, DEFAULT_THRESHOLD, DEFAULT_STALENESS_DAYS,
+        )
+        # Constructor override (tests / programmatic use) wins.
+        override = self._config.get("dream") if self._config else None
+        if isinstance(override, dict):
+            return {
+                "enabled": _coerce_bool(override.get("enabled"), enabled),
+                "threshold": int(override.get("threshold", threshold)),
+                "staleness_days": int(override.get("staleness_days", staleness)),
+            }
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            dream = m4.get("dream", {}) if isinstance(m4, dict) else {}
+            if isinstance(dream, dict):
+                if "enabled" in dream:
+                    enabled = _coerce_bool(dream.get("enabled"), enabled)
+                if dream.get("threshold"):
+                    threshold = int(dream["threshold"])
+                if dream.get("staleness_days"):
+                    staleness = int(dream["staleness_days"])
+        except Exception:
+            pass
+        return {"enabled": enabled, "threshold": threshold, "staleness_days": staleness}
+
+    def _build_dream(self) -> Optional[DreamProcessor]:
+        assert self._root is not None
+        cfg = self._resolve_dream_config()
+        return DreamProcessor(
+            self._root,
+            enabled=cfg["enabled"],
+            threshold=cfg["threshold"],
+            staleness_days=cfg["staleness_days"],
+        )
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """④ Dream — session boundary: event threshold OR staleness floor.
+
+        Fires the same consolidation gate as on_memory_write, but at a natural
+        boundary. Idle sessions (no pending signal) skip. Non-fatal.
+        """
+        if not self._active or not self._dream:
+            return
+        try:
+            self._dream.maybe_consolidate("session_end")
+        except Exception as e:
+            logger.debug("mem4 dream (session_end) failed (non-fatal): %s", e)
 
     def _backfill(self) -> None:
         """FTS5 backfill from existing session history — DEFERRED to feature ①.
@@ -344,6 +436,15 @@ class Mem4MemoryProvider(MemoryProvider):
             self._mirror_write(mirror_target, action, content)
         except Exception as e:
             logger.debug("mem4 mirror write failed (non-fatal): %s", e)
+
+        # ④ Dream — count this write as new material; a threshold crossing
+        # triggers consolidation (of mem4-owned L2/L3 only). Non-fatal.
+        if self._dream:
+            try:
+                self._dream.record_signal(1)
+                self._dream.maybe_consolidate("threshold")
+            except Exception as e:
+                logger.debug("mem4 dream (on_memory_write) failed (non-fatal): %s", e)
 
     def _mirror_write(self, target: str, action: str, content: str) -> None:
         assert self._root is not None

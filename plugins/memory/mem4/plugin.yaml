@@ -5,3 +5,4 @@ description: "mem4 — four-tier routed memory (L0/L1/L2/L3) as a MemoryProvider
 hooks:
   - on_memory_write
   - on_pre_compress
+  - on_session_end
