@@ -1,0 +1,7 @@
+name: mem4
+version: 0.1.0
+description: "mem4 — four-tier routed memory (L0/L1/L2/L3) as a MemoryProvider, coexist/augment mode. ⑤-minimal chassis."
+# No external dependencies: default local-file backend uses stdlib only.
+hooks:
+  - on_memory_write
+  - on_pre_compress
