@@ -25,10 +25,10 @@ def test_register_captures_provider():
     assert captured["provider"].name == "mem4"
 
 
-def test_tool_schema_is_mem_route_only():
+def test_tool_schemas_route_and_search():
     schemas = Mem4MemoryProvider({"backend": "local-file"}).get_tool_schemas()
     names = [s["name"] for s in schemas]
-    assert names == ["mem_route"]  # mem_search withheld until feature ①
+    assert names == ["mem_route", "mem_search"]  # mem_search live since feature ①
 
 
 # -- availability gating -----------------------------------------------------
@@ -171,8 +171,10 @@ def test_idempotent_init_marker(tmp_path):
     state = json.loads(marker.read_text(encoding="utf-8"))
     assert state["schema_version"] == 1
     assert state["migration_complete"] is True
-    assert state["backfill_complete"] is False       # FTS5 deferred to ①
-    assert "backfill_cursor" in state                # reserved seam for ①
+    # ① is wired: with no history source, backfill completes at init (microfiles
+    # are indexed synchronously) — the cursor seam is still present.
+    assert state["backfill_complete"] is True
+    assert "backfill_cursor" in state
     assert state["counts"]["microfiles"] == 2        # adopted, not rebuilt
 
     marker_snapshot = marker.read_text(encoding="utf-8")

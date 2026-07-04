@@ -83,11 +83,14 @@ class MicrofileResult:
 
 @dataclass
 class SearchHit:
-    """One recall hit. Populated by feature ① (FTS5); unused in ⑤-minimal."""
+    """One recall hit from the FTS5 recall store (feature ①)."""
 
     ref: str
     snippet: str
     score: float = 0.0
+    kind: str = ""          # "turn" | "microfile"
+    ts: float = 0.0         # unix seconds
+    route: str = ""         # which path answered: "fts" | "trigram" | "like"
 
 
 class StorageBackend(ABC):
@@ -140,6 +143,12 @@ class LocalFileBackend(StorageBackend):
 
     def __init__(self, root: Path):
         self.root = Path(root)
+        # Attached by the provider once feature ①'s recall store is built. When
+        # None, search() returns [] (⑤-minimal behaviour).
+        self.recall = None
+
+    def attach_recall(self, store) -> None:
+        self.recall = store
 
     # -- microfiles ----------------------------------------------------------
 
@@ -183,10 +192,13 @@ class LocalFileBackend(StorageBackend):
     # -- recall (deferred to feature ①) --------------------------------------
 
     def search(self, query: str, *, limit: int = 5) -> List[SearchHit]:
-        # ⑤-minimal ships no index. Feature ① builds mem4's own FTS5 table
-        # (design spike §10.8 decision B) and fills this in. Returning [] keeps
-        # the chassis honest: no results rather than a fake claim of recall.
-        return []
+        # Feature ①: delegate to the attached FTS5 recall store (mem4's own
+        # dual-table DB — design spike §10.8 decision B). Without a store
+        # attached (⑤-minimal), return [] rather than a fake claim of recall.
+        if self.recall is None:
+            return []
+        import time
+        return self.recall.search(query, limit=limit, now=time.time())
 
     def is_ready(self) -> bool:
         # Local file I/O has no remote dependency; ready as long as the root is

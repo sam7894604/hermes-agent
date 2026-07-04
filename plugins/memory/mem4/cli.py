@@ -1,0 +1,42 @@
+"""CLI for the mem4 memory plugin: ``hermes mem4 rebuild``.
+
+Exposes the "derived layers are always reconstructible" guarantee (Fable 5
+review §5) as a command: rebuild mem4's FTS5 recall index from the
+source-of-truth files (microfiles + mirror logs), never touching the built-in
+MEMORY.md/USER.md.
+"""
+
+from __future__ import annotations
+
+
+def cmd_rebuild(args) -> None:
+    from hermes_constants import get_hermes_home
+    from plugins.memory.mem4 import Mem4MemoryProvider
+
+    provider = Mem4MemoryProvider()
+    provider.initialize("cli-rebuild", hermes_home=str(get_hermes_home()), platform="cli")
+    if not provider._active:
+        print("  mem4 is not active (check memory.mem4.backend). Nothing to rebuild.\n")
+        return
+    result = provider.rebuild()
+    provider.shutdown()
+    print("\nmem4 recall rebuild\n" + "─" * 32)
+    print(f"  indexed (microfiles/mirror): {result.get('indexed', 0)}")
+    print(f"  total recall docs:           {result.get('recall_docs', 0)}\n")
+
+
+def register_cli(subparser) -> None:
+    """Add mem4 subcommands to the ``hermes mem4`` parser."""
+    sub = subparser.add_subparsers(dest="mem4_cmd")
+    rebuild_p = sub.add_parser(
+        "rebuild",
+        help="Rebuild mem4's FTS5 recall index from source files (non-destructive).",
+    )
+    rebuild_p.set_defaults(func=cmd_rebuild)
+
+
+def mem4_command(args) -> None:
+    """Default handler when ``hermes mem4`` is run with no subcommand."""
+    if getattr(args, "mem4_cmd", None) is None:
+        print("\nmem4 — four-tier routed memory provider\n")
+        print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files\n")

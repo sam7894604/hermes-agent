@@ -19,8 +19,11 @@ Feature ④ (Dream consolidation) is wired in via dream.py — event/threshold +
 session-boundary staleness triggers over mem4-owned L2/L3, fully in-provider
 with no external cron dependency. See dream.py and the README deployment note.
 
-Deferred (stubs / not wired) to keep scope tight:
-  * feature ① — ``prefetch`` / ``sync_turn`` / FTS5 recall + backfill
+Feature ① (FTS5 recall) is wired in via recall.py — mem4's own dual-table FTS5
+database (unicode61 + trigram, with CJK routing and LIKE fallback) indexing both
+conversation turns (via ``sync_turn``) and the L2/L3 microfiles. It powers the
+``mem_search`` tool and ``prefetch`` (local-I/O-only, char-capped). Backfill of
+existing history is resumable via the ``.mem4_state.json`` cursor (§10.4).
 
 See design spike: 技術/架構決策/2026-07-04_四層記憶包裝為Hermes-Provider設計spike.md
 """
@@ -29,9 +32,11 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
@@ -50,8 +55,16 @@ from .dream import (
     DEFAULT_THRESHOLD,
     DEFAULT_STALENESS_DAYS,
 )
+from .recall import RecallStore
 
 logger = logging.getLogger(__name__)
+
+#: Default cap on characters injected by prefetch() (design spike / Fable 5 §2).
+DEFAULT_PREFETCH_CAP = 2000
+#: sync_turn filter: minimum user-content length worth indexing.
+_MIN_INDEX_LEN = 12
+#: Backfill batches processed per background worker (bounded per run).
+_BACKFILL_BATCH_SIZE = 200
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -112,6 +125,25 @@ MEM_ROUTE_SCHEMA = {
     },
 }
 
+MEM_SEARCH_SCHEMA = {
+    "name": "mem_search",
+    "description": (
+        "Full-text search mem4's recall index (past conversation turns and "
+        "cold-tier microfiles) for knowledge that has left the always-loaded "
+        "hot zone. Works for English and Chinese (CJK). Use when you need to "
+        "recall something discussed or recorded earlier that is not in "
+        "MEMORY.md. Returns ranked snippets with their source."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "limit": {"type": "integer", "description": "Max hits (default 5)."},
+        },
+        "required": ["query"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Provider
@@ -131,6 +163,15 @@ class Mem4MemoryProvider(MemoryProvider):
         self._ran_migration = False
         self._state: Dict[str, Any] = {}
         self._dream: Optional[DreamProcessor] = None
+        # ① FTS5 recall
+        self._recall: Optional[RecallStore] = None
+        self._prefetch_cap = DEFAULT_PREFETCH_CAP
+        # Injectable history source for backfill: fetch(since_rowid, batch_size)
+        # -> iterable of (rowid, ref, content, ts). None ⇒ no history backfill
+        # (only microfiles are indexed). Real deployments wire a session-store
+        # reader; tests inject a fake. See set_backfill_source().
+        self._backfill_source: Optional[Callable[[int, int], Iterable[Tuple[int, str, str, float]]]] = None
+        self._backfill_thread: Optional[threading.Thread] = None
 
     # -- identity ------------------------------------------------------------
 
@@ -183,13 +224,23 @@ class Mem4MemoryProvider(MemoryProvider):
 
         try:
             self._ran_migration = self._ensure_bootstrap()
-            self._backfill()  # stub in ⑤-minimal (design spike §10.4 → feature ①)
+            self._prefetch_cap = self._resolve_prefetch_cap()
+            # ① Build the FTS5 recall store and attach it to the backend so
+            # backend.search() is live. Index existing microfiles synchronously
+            # (fast, needed for immediate recall); history backfill runs in the
+            # background (resumable via the marker cursor).
+            self._recall = RecallStore(self._root / "recall.db")
+            if isinstance(self._backend, LocalFileBackend):
+                self._backend.attach_recall(self._recall)
+            self._index_microfiles()
+            self._start_backfill()
             self._dream = self._build_dream()
             self._active = True
             logger.info(
-                "mem4 active (backend=%s, microfiles=%d, migration_ran=%s, dream=%s)",
+                "mem4 active (backend=%s, microfiles=%d, recall_docs=%d, trigram=%s, dream=%s)",
                 kind, self._state.get("counts", {}).get("microfiles", 0),
-                self._ran_migration, self._dream.enabled if self._dream else False,
+                self._recall.count(), self._recall.trigram_available,
+                self._dream.enabled if self._dream else False,
             )
         except Exception as e:
             logger.warning("mem4 initialize failed — provider inactive: %s", e)
@@ -205,8 +256,37 @@ class Mem4MemoryProvider(MemoryProvider):
                 logger.debug("mem4 dream (session_start) failed (non-fatal): %s", e)
 
     def shutdown(self) -> None:
-        # No background threads in ⑤-minimal; nothing to flush.
-        return
+        # Let a running backfill finish briefly, then close the recall DB.
+        if self._backfill_thread and self._backfill_thread.is_alive():
+            self._backfill_thread.join(timeout=2.0)
+        if self._recall is not None:
+            self._recall.close()
+
+    def set_backfill_source(
+        self, fetch: Callable[[int, int], Iterable[Tuple[int, str, str, float]]]
+    ) -> None:
+        """Inject a history source for backfill (real deployment / tests)."""
+        self._backfill_source = fetch
+
+    def _resolve_prefetch_cap(self) -> int:
+        override = (self._config or {}).get("prefetch_cap") if self._config else None
+        if override:
+            try:
+                return max(200, int(override))
+            except (TypeError, ValueError):
+                pass
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            recall = m4.get("recall", {}) if isinstance(m4, dict) else {}
+            if isinstance(recall, dict) and recall.get("prefetch_cap"):
+                return max(200, int(recall["prefetch_cap"]))
+        except Exception:
+            pass
+        return DEFAULT_PREFETCH_CAP
 
     # -- idempotent init / migration (design spike §10) ----------------------
 
@@ -329,27 +409,103 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("mem4 dream (session_end) failed (non-fatal): %s", e)
 
-    def _backfill(self) -> None:
-        """FTS5 backfill from existing session history — DEFERRED to feature ①.
+    # -- ① FTS5 recall: indexing / backfill ----------------------------------
 
-        Design spike §10.4 / §10.8 (decision B: mem4 owns its own FTS5 table).
-        ⑤-minimal only reserves ``backfill_cursor`` in the marker; it indexes
-        nothing. Kept as a named seam so ① fills it without reshaping the
-        chassis.
+    def _index_microfiles(self) -> int:
+        """Index all L2/L3 microfiles into recall (also indexes mirror logs)."""
+        if self._recall is None or self._backend is None:
+            return 0
+        n = 0
+        for code in self._backend.list_codes():
+            result = self._backend.read_microfile(code)
+            if result and self._recall.index(
+                ref=f"microfile:{code}", content=result.content,
+                kind="microfile", ts=time.time(),
+            ):
+                n += 1
+        # Mirror logs too, so recall covers observed built-in writes.
+        mirror_dir = self._root / MIRROR_DIRNAME
+        if mirror_dir.is_dir():
+            for path in sorted(mirror_dir.glob("*.md")):
+                if path.name.startswith("_"):
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if self._recall.index(
+                    ref=f"mirror:{path.stem}", content=text,
+                    kind="microfile", ts=time.time(),
+                ):
+                    n += 1
+        return n
+
+    def _backfill_in_progress(self) -> bool:
+        state = self._read_state()
+        return bool(state.get("schema_version")) and not state.get("backfill_complete", False)
+
+    def _start_backfill(self) -> None:
+        """Kick off resumable history backfill in the background (non-blocking).
+
+        No source ⇒ nothing to backfill from; mark complete (microfiles already
+        indexed synchronously). With a source, a daemon thread processes batches
+        and persists the cursor after each, so a restart resumes mid-stream
+        (design spike §10.4). Runs off the hot path; never blocks a turn.
         """
-        return
+        if self._recall is None:
+            return
+        if self._backfill_source is None:
+            self._mark_backfill_complete()
+            return
+        self._backfill_thread = threading.Thread(
+            target=self._backfill_worker, name="mem4-backfill", daemon=True,
+        )
+        self._backfill_thread.start()
+
+    def _backfill_worker(self, max_batches: Optional[int] = None) -> int:
+        """Process backfill batches until the source is exhausted. Resumable.
+
+        Returns the number of docs indexed this run. ``max_batches`` bounds the
+        run (used by tests to assert resumption); None runs to completion.
+        """
+        if self._recall is None or self._backfill_source is None:
+            return 0
+        total = 0
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            state = self._read_state()
+            cursor = int(state.get("backfill_cursor") or 0)
+            indexed, new_cursor, has_more = self._recall.backfill_batch(
+                self._backfill_source, since_rowid=cursor,
+                batch_size=_BACKFILL_BATCH_SIZE,
+            )
+            total += indexed
+            batches += 1
+            state["backfill_cursor"] = new_cursor
+            if not has_more:
+                state["backfill_complete"] = True
+                self._write_state(state)
+                break
+            self._write_state(state)
+        return total
+
+    def _mark_backfill_complete(self) -> None:
+        state = self._read_state()
+        state["backfill_complete"] = True
+        self._write_state(state)
 
     # -- tools ---------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        # ⑤-minimal exposes only the working tool. mem_search (conversation
-        # recall) is intentionally withheld until feature ① backs it with FTS5
-        # — advertising a dead tool would waste tokens and mislead the model.
-        return [MEM_ROUTE_SCHEMA]
+        # ① is live: mem_search is now backed by the FTS5 recall store, so it is
+        # advertised alongside mem_route.
+        return [MEM_ROUTE_SCHEMA, MEM_SEARCH_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if tool_name == "mem_route":
             return self._tool_route(args or {})
+        if tool_name == "mem_search":
+            return self._tool_search(args or {})
         return tool_error(f"Unknown tool: {tool_name}")
 
     def _tool_route(self, args: dict) -> str:
@@ -379,6 +535,123 @@ class Mem4MemoryProvider(MemoryProvider):
             ensure_ascii=False,
         )
 
+    def _tool_search(self, args: dict) -> str:
+        query = (args.get("query") or "").strip()
+        if not query:
+            return tool_error("query is required")
+        if not self._active or self._recall is None:
+            return json.dumps({"query": query, "hits": []}, ensure_ascii=False)
+        try:
+            limit = int(args.get("limit") or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        limit = max(1, min(limit, 20))
+        hits = self._recall.search(query, limit=limit, now=time.time())
+        payload = {
+            "query": query,
+            "hits": [
+                {"ref": h.ref, "kind": h.kind, "route": h.route, "snippet": h.snippet}
+                for h in hits
+            ],
+        }
+        # Honesty during backfill: recall may not yet cover old history.
+        if self._backfill_in_progress():
+            payload["note"] = "[backfill in progress: older history may not be indexed yet]"
+        return json.dumps(payload, ensure_ascii=False)
+
+    # -- ① recall: prefetch (turn-start, local-only, capped) -----------------
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Recall context for the upcoming turn — LOCAL FTS5 ONLY.
+
+        Guardrail (Fable 5 review §2): prefetch runs synchronously on the turn's
+        hot path, so it must NEVER make an MCP/network call — it only reads the
+        local SQLite recall store and local files. The injected text is capped at
+        ``self._prefetch_cap`` characters to bound token cost.
+        """
+        if not self._active or self._recall is None:
+            return ""
+        if not query or len(query.strip()) < _MIN_INDEX_LEN:
+            return ""
+        try:
+            hits = self._recall.search(query.strip(), limit=5, now=time.time())
+        except Exception as e:
+            logger.debug("mem4 prefetch failed (non-fatal): %s", e)
+            return ""
+        if not hits:
+            return ""
+        lines = ["## mem4 recall"]
+        for h in hits:
+            lines.append(f"- ({h.kind}) {h.snippet}")
+        text = "\n".join(lines)
+        if len(text) > self._prefetch_cap:
+            suffix = " …[truncated]"
+            keep = max(0, self._prefetch_cap - len(suffix))
+            text = text[:keep].rstrip() + suffix
+        return text
+
+    # -- ① recall: sync_turn (filtered, deduped indexing) --------------------
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Index a completed turn into the recall store, filtered.
+
+        Filtering (Fable 5 review §5): skip trivially short turns and tool-output
+        noise; dedup is handled by the recall store's content hash. Time-decay in
+        ranking is applied at search time, not here.
+        """
+        if not self._active or self._recall is None:
+            return
+        user_content = (user_content or "").strip()
+        if len(user_content) < _MIN_INDEX_LEN:
+            return
+        assistant_content = (assistant_content or "").strip()
+        # Strip obvious tool-output scaffolding from the assistant side.
+        if assistant_content.startswith("{") and '"tool' in assistant_content[:200]:
+            assistant_content = ""
+        combined = f"User: {user_content}"
+        if assistant_content:
+            combined += f"\nAssistant: {assistant_content[:2000]}"
+        try:
+            self._recall.index(
+                ref=f"turn:{session_id}", content=combined,
+                kind="turn", ts=time.time(),
+            )
+        except Exception as e:
+            logger.debug("mem4 sync_turn index failed (non-fatal): %s", e)
+
+    # -- ① recall: rebuild (fifth non-negotiable guarantee) ------------------
+
+    def rebuild(self) -> Dict[str, int]:
+        """Rebuild all derived state (recall FTS5) from source-of-truth files.
+
+        Fable 5 review §5 / fifth guarantee: derived layers are always
+        reconstructible. Clears the recall index and re-indexes from the
+        mem4-owned microfiles + mirror logs, then re-runs history backfill.
+        Returns counts for verification. Never reads-for-write the built-in
+        memory files.
+        """
+        if not self._active or self._recall is None:
+            return {"indexed": 0}
+        self._recall.clear()
+        # Reset the backfill cursor so history is re-indexed from the start.
+        state = self._read_state()
+        state["backfill_cursor"] = 0
+        state["backfill_complete"] = False
+        self._write_state(state)
+        indexed = self._index_microfiles()
+        if self._backfill_source is not None:
+            self._backfill_worker()
+        else:
+            self._mark_backfill_complete()
+        return {"indexed": indexed, "recall_docs": self._recall.count()}
+
     # -- system prompt / compression -----------------------------------------
 
     def system_prompt_block(self) -> str:
@@ -389,11 +662,11 @@ class Mem4MemoryProvider(MemoryProvider):
         # exists and what the codes mean (design spike §2).
         return (
             "# mem4 記憶路由（補強層）\n"
-            "內建 MEMORY.md/USER.md 為權威 L0；mem4 提供按需的冷區微檔讀取。\n"
+            "內建 MEMORY.md/USER.md 為權威 L0；mem4 提供按需的冷區微檔讀取與召回。\n"
             "路由碼：§sys 系統/環境 · §fam 人物/家庭 · §vlt vault/知識 · "
             "§adr 架構決策 · §proto 協定/流程。\n"
-            "L0 缺該細節時用 mem_route(code) 讀對應微檔"
-            "（mem_search 對話召回於功能①上線後提供）。"
+            "L0 缺該細節時：用 mem_route(code) 讀對應微檔；"
+            "用 mem_search(query) 全文召回舊對話/冷知識（支援中文）。"
         )
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:

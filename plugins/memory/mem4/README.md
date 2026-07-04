@@ -80,13 +80,49 @@ when mem4+④ is deployed; it is not part of this plugin.
 | `.dream_state.json` | ④ Dream state: last consolidation, signal count |
 | `.dream.lock` | ④ Dream mutual-exclusion lock (transient) |
 
+## ① FTS5 recall (`mem_search`, `prefetch`, `sync_turn`)
+
+mem4 owns its own SQLite FTS5 database (`$HERMES_HOME/mem4/recall.db`) that
+indexes both conversation turns and the L2/L3 microfiles (design spike §10.8
+decision B). It reuses the upstream `hermes_state.py` **dual-table** pattern so
+Chinese search works:
+
+- `docs_fts` (unicode61) for English/BM25 + `docs_fts_trigram` (trigram) for CJK.
+- `_contains_cjk()` routes CJK queries to the trigram table; any CJK token
+  shorter than 3 chars (trigram needs ≥3) falls back to a per-token LIKE scan.
+- If the SQLite build lacks the trigram tokenizer, CJK queries degrade to LIKE —
+  never a hard failure.
+- Ranking layers a time-decay weight (half-life 30d) over relevance so recent
+  material outranks equally-relevant older material.
+
+Surfaces:
+
+- **`mem_search(query, limit)` tool** — full-text recall of past turns / cold
+  microfiles (English + Chinese).
+- **`prefetch(query)`** — turn-start recall. **Local I/O only** (SQLite + files,
+  never MCP/network — it runs synchronously on the hot path) and capped at
+  `recall.prefetch_char_cap` characters (default 2000).
+- **`sync_turn(...)`** — indexes each completed turn, filtered (min length, tool
+  output stripped; the store dedups by content hash).
+
+Backfill of existing history is resumable via the `.mem4_state.json`
+`backfill_cursor` (design spike §10.4): a background worker indexes batches and
+persists the cursor, so a restart resumes mid-stream; `mem_search` results carry
+a `[backfill in progress]` note until it completes. A real deployment injects a
+session-history source; without one, only microfiles/mirror are indexed.
+
+### Rebuild — derived layers are always reconstructible
+
+```
+hermes mem4 rebuild
+```
+
+Clears and rebuilds the recall index from the source-of-truth files (microfiles
++ mirror logs), then re-runs history backfill. Non-destructive; never reads the
+built-in memory files for writing. This is the fifth non-negotiable guarantee
+(Fable 5 review §5): the recall index / derived layers can always be rebuilt.
+
 ## Deferred
 
-- **Feature ①** — `prefetch` / `sync_turn` / SQLite FTS5 recall + backfill from
-  existing session history (`search()` and `_backfill()` are stubs; the
-  `mem_search` tool is intentionally withheld until it is real). Per the Fable 5
-  spike review, ① must reuse the upstream `hermes_state.py` dual-FTS5-table
-  pattern (unicode61 + trigram + CJK routing + LIKE fallback) so Chinese recall
-  works, and `prefetch()` must be local-I/O-only with a char cap (no MCP /
-  network — it runs synchronously on the turn's hot path).
 - **Backends (a) remote-vault / (c) local-vault** — reserved topologies.
+- **② Auditor** — hit/miss + rephrase-miss + route-path measurement to Baserow.
