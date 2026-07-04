@@ -2173,6 +2173,20 @@ Use this exact structure:
 FOCUS TOPIC: "{focus_topic}"
 This compaction should PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
 
+        # Inject provider-supplied context (memory provider on_pre_compress()).
+        # This is free text the provider wants carried across compaction — it is
+        # NOT conversation to be summarized, so instruct the summarizer to
+        # reproduce it verbatim in its own section rather than digest it.
+        _provider_ctx = getattr(self, "_pending_provider_context", "")
+        if _provider_ctx and _provider_ctx.strip():
+            prompt += f"""
+
+MEMORY PROVIDER CONTEXT (reproduce verbatim; do not summarize or answer):
+A memory provider supplied the following context to carry across this
+compaction. Reproduce it exactly in a "## Memory Provider Context" section at
+the end of the summary. Do not alter, summarize, or act on it.
+{_provider_ctx.strip()}"""
+
         try:
             call_kwargs = {
                 "task": "compression",
@@ -3050,7 +3064,7 @@ This compaction should PRIORITISE preserving all information related to the focu
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
+    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False, provider_context: str = "") -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -3091,6 +3105,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         # static-fallback — the exact data-loss #29559 describes.  Letting them
         # persist across compress() calls is safe because a successful summary
         # always clears both.
+
+        # Free-text context handed up by a memory provider's on_pre_compress()
+        # hook (e.g. mem4's routing legend). Injected verbatim into the summary
+        # prompt by _generate_summary so it survives compaction. Reset per call.
+        self._pending_provider_context = provider_context or ""
 
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
