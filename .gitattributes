@@ -8,3 +8,11 @@ web/package-lock.json linguist-generated=true
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# Python sources are LF. The code is stored LF in git, but on Windows
+# core.autocrlf=true converts to CRLF both on checkout AND on `git archive`,
+# which is the deploy path (git archive HEAD | tar -x into the Linux venv).
+# That leaked CRLF into the production site-packages. An explicit eol=lf
+# attribute overrides core.autocrlf so archive/checkout always emit LF.
+*.py        text eol=lf
+*.pyi       text eol=lf
