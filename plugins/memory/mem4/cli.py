@@ -9,9 +9,27 @@ MEMORY.md/USER.md.
 from __future__ import annotations
 
 
+def _ensure_importable() -> None:
+    """Make ``import mem4.*`` work whether mem4 is bundled or a user plugin.
+
+    Bundled it imports as ``plugins.memory.mem4``; installed under
+    ``$HERMES_HOME/plugins/`` it loads via a synthetic namespace, so the
+    absolute path ``plugins.memory.mem4`` is NOT importable. Adding the
+    directory that contains the ``mem4`` package to sys.path lets the harness
+    and provider be imported as top-level ``mem4`` in both layouts.
+    """
+    import sys
+    from pathlib import Path
+
+    parent = str(Path(__file__).resolve().parent.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+
+
 def cmd_rebuild(args) -> None:
     from hermes_constants import get_hermes_home
-    from plugins.memory.mem4 import Mem4MemoryProvider
+    _ensure_importable()
+    from mem4 import Mem4MemoryProvider
 
     provider = Mem4MemoryProvider()
     provider.initialize("cli-rebuild", hermes_home=str(get_hermes_home()), platform="cli")
@@ -26,7 +44,8 @@ def cmd_rebuild(args) -> None:
 
 
 def cmd_eval(args) -> None:
-    from plugins.memory.mem4.eval.harness import run_all, format_full_report
+    _ensure_importable()
+    from mem4.eval.harness import run_all, format_full_report
 
     print(format_full_report(run_all()))
 
