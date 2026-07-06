@@ -272,3 +272,77 @@
   font-size: 12px;
   color: var(--destructive, #ef4444);
 }
+
+/* --- authorized list (store ∪ env overlay) ------------------------------ */
+
+.hermes-line-auth-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.hermes-line-auth-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted, #171717);
+}
+
+.hermes-line-auth-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hermes-line-auth-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-auth-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground, #9ca3af);
+}
+
+.hermes-line-auth-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-auth-x {
+  margin-left: auto;
+}
+
+.hermes-line-lock {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* source / role badges */
+.hermes-line-src {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.hermes-line-src--store {
+  background: var(--secondary, #1f2937);
+  color: var(--secondary-foreground, #cbd5e1);
+}
+.hermes-line-src--env {
+  background: var(--accent, #3f2d0f);
+  color: var(--accent-foreground, #fbbf24);
+}
+.hermes-line-src--admin {
+  background: var(--destructive, #7f1d1d);
+  color: #fff;
+}
