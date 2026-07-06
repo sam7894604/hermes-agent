@@ -162,6 +162,100 @@
   }
 
   // -------------------------------------------------------------------------
+  // Authorized section — the full authorized picture (store ∪ env overlay)
+  // -------------------------------------------------------------------------
+  //
+  // Distinct from the Pending queue and from the editable Allowlist chips:
+  // this lists every id the LINE gate would authorize — STORE entries AND the
+  // env-overlay ids (LINE_ALLOWED_USERS/GROUPS/ROOMS) that are otherwise
+  // invisible. Locked rows (admin or env-managed) show a 🔒 and no delete.
+
+  function AuthorizedRow(props) {
+    const { entry, scope, resolvable, resolveName, onRemove, busy } = props;
+    const id = entry.id;
+    const locked = !!entry.locked;
+    const [name, setName] = useState(entry.name || null);
+
+    useEffect(function () {
+      let alive = true;
+      if (!name && resolvable) {
+        resolveName(resolvable, id).then(function (n) {
+          if (alive && n && n !== id) setName(n);
+        });
+      }
+      return function () { alive = false; };
+    }, [resolvable, id, resolveName]);  // eslint-disable-line
+
+    const badgeCls = entry.source === "env"
+      ? "hermes-line-src hermes-line-src--env"
+      : "hermes-line-src hermes-line-src--store";
+
+    return h("div", { className: "hermes-line-auth-row", title: entry.note || "" },
+      h("div", { className: "hermes-line-auth-main" },
+        h("span", { className: "hermes-line-auth-name" }, name || id),
+        entry.admin ? h(Badge, { className: "hermes-line-src hermes-line-src--admin" }, "admin") : null,
+        h(Badge, { className: badgeCls }, entry.source || "store"),
+        entry.also_in_env ? h(Badge, { className: "hermes-line-src hermes-line-src--env" }, "+env") : null,
+        locked ? h("span", { className: "hermes-line-lock", title: entry.admin ? "admin (protected)" : "managed via env" }, "🔒") : null,
+      ),
+      h("div", { className: "hermes-line-auth-meta" },
+        h("span", { className: "hermes-line-auth-id" }, id),
+        h("span", null, entry.added_at ? timeAgo(entry.added_at) : ""),
+        !locked
+          ? h("button", {
+              className: "hermes-line-chip-x hermes-line-auth-x",
+              disabled: !!busy,
+              title: "Remove",
+              onClick: function () { onRemove(scope, id); },
+            }, "×")
+          : null,
+      ),
+    );
+  }
+
+  function AuthorizedSection(props) {
+    const { data, loading, busy, onRemove, resolveName } = props;
+    const total = SCOPES.reduce(function (n, s) {
+      return n + (((data && data[s.bucket]) || []).length);
+    }, 0);
+
+    return h(Card, { className: "hermes-line-card" },
+      h(CardContent, { className: "hermes-line-card-body" },
+        h("div", { className: "hermes-line-section-head" },
+          "Authorized / 已授權清單",
+          h(Badge, { className: "hermes-line-count" }, String(total)),
+        ),
+        loading
+          ? h("div", { className: "hermes-line-empty" }, "loading…")
+          : SCOPES.map(function (s) {
+              const entries = (data && data[s.bucket]) || [];
+              return h("div", { key: s.scope, className: "hermes-line-scope-block" },
+                h("div", { className: "hermes-line-scope-title" },
+                  s.label,
+                  h(Badge, { className: "hermes-line-count" }, String(entries.length)),
+                ),
+                entries.length === 0
+                  ? h("div", { className: "hermes-line-empty" }, "none")
+                  : h("div", { className: "hermes-line-auth-list" },
+                      entries.map(function (entry) {
+                        return h(AuthorizedRow, {
+                          key: entry.id + ":" + s.scope,
+                          entry: entry,
+                          scope: s.scope,
+                          resolvable: s.resolvable,
+                          resolveName: resolveName,
+                          busy: busy,
+                          onRemove: onRemove,
+                        });
+                      })
+                    ),
+              );
+            }),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Pending section — attempts awaiting an approve / ignore decision
   // -------------------------------------------------------------------------
 
@@ -283,6 +377,8 @@
 
   function LineWhitelistPage() {
     const [whitelist, setWhitelist] = useState({ users: [], groups: [], rooms: [] });
+    const [authorized, setAuthorized] = useState({ users: [], groups: [], rooms: [] });
+    const [authLoading, setAuthLoading] = useState(true);
     const [wlError, setWlError] = useState(null);
     const [busy, setBusy] = useState(false);
 
@@ -318,6 +414,21 @@
         .catch(function (e) { setWlError(String(e && e.message || e)); });
     }, []);
 
+    // ---- authorized load (store ∪ env overlay) ----------------------------
+    const loadAuthorized = useCallback(function () {
+      setAuthLoading(true);
+      return SDK.fetchJSON(`${API}/authorized`)
+        .then(function (data) {
+          setAuthorized({
+            users: (data && data.users) || [],
+            groups: (data && data.groups) || [],
+            rooms: (data && data.rooms) || [],
+          });
+        })
+        .catch(function () { setAuthorized({ users: [], groups: [], rooms: [] }); })
+        .finally(function () { setAuthLoading(false); });
+    }, []);
+
     // ---- records load -----------------------------------------------------
     const loadRecords = useCallback(function () {
       setRecLoading(true);
@@ -337,8 +448,8 @@
     }, []);
 
     useEffect(function () {
-      loadWhitelist(); loadPending(); loadRecords();
-    }, [loadWhitelist, loadPending, loadRecords]);
+      loadWhitelist(); loadAuthorized(); loadPending(); loadRecords();
+    }, [loadWhitelist, loadAuthorized, loadPending, loadRecords]);
 
     // ---- add / remove -----------------------------------------------------
     const onAdd = useCallback(function (body) {
@@ -348,10 +459,10 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       })
-        .then(function () { setWlError(null); return loadWhitelist(); })
+        .then(function () { setWlError(null); return Promise.all([loadWhitelist(), loadAuthorized()]); })
         .catch(function (e) { setWlError(String(e && e.message || e)); })
         .finally(function () { setBusy(false); });
-    }, [loadWhitelist]);
+    }, [loadWhitelist, loadAuthorized]);
 
     const onRemove = useCallback(function (scope, id) {
       setBusy(true);
@@ -359,10 +470,17 @@
         `${API}/whitelist/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`,
         { method: "DELETE" }
       )
-        .then(function () { setWlError(null); return loadWhitelist(); })
+        .then(function (res) {
+          if (res && res.env_managed) {
+            setWlError(id + " is managed via env (LINE_ALLOWED_*) — edit the env var, not the dashboard.");
+          } else {
+            setWlError(null);
+          }
+          return Promise.all([loadWhitelist(), loadAuthorized()]);
+        })
         .catch(function (e) { setWlError(String(e && e.message || e)); })
         .finally(function () { setBusy(false); });
-    }, [loadWhitelist]);
+    }, [loadWhitelist, loadAuthorized]);
 
     // ---- approve / ignore a pending attempt -------------------------------
     const onApprove = useCallback(function (id) {
@@ -372,10 +490,10 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       })
-        .then(function () { return Promise.all([loadPending(), loadWhitelist()]); })
+        .then(function () { return Promise.all([loadPending(), loadWhitelist(), loadAuthorized()]); })
         .catch(function (e) { setWlError(String(e && e.message || e)); })
         .finally(function () { setBusy(false); });
-    }, [loadPending, loadWhitelist]);
+    }, [loadPending, loadWhitelist, loadAuthorized]);
 
     const onIgnore = useCallback(function (id) {
       setBusy(true);
@@ -402,7 +520,7 @@
       h("div", { className: "hermes-line-header" },
         h("h2", { className: "hermes-line-title" }, "LINE Whitelist"),
         h(Button, { size: "sm", variant: "outline", onClick: function () {
-          loadWhitelist(); loadPending(); loadRecords();
+          loadWhitelist(); loadAuthorized(); loadPending(); loadRecords();
         } }, "Refresh"),
       ),
       h(PendingSection, {
@@ -411,6 +529,13 @@
         busy: busy,
         onApprove: onApprove,
         onIgnore: onIgnore,
+      }),
+      h(AuthorizedSection, {
+        data: authorized,
+        loading: authLoading,
+        busy: busy,
+        onRemove: onRemove,
+        resolveName: resolveName,
       }),
       h(WhitelistSection, {
         data: whitelist,
