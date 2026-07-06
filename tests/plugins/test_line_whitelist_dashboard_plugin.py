@@ -40,9 +40,12 @@ class _FakeStore:
     """
 
     _data = {"users": [], "groups": [], "rooms": []}
-    _admin = ("user", "Uadmin")
+    # store scope vocabulary (dm/group/room) — the dashboard handler translates
+    # the URL's "user" -> "dm" before calling the store, so the fake mirrors the
+    # REAL store's scope keys.
+    _admin = ("dm", "Uadmin")
 
-    _BUCKET = {"user": "users", "group": "groups", "room": "rooms"}
+    _BUCKET = {"dm": "users", "group": "groups", "room": "rooms"}
 
     # Pending queue (Phase-A contract). Class-level so every WhitelistStore()
     # the handler constructs shares the same queue within a test.
@@ -90,7 +93,7 @@ class _FakeStore:
         return len(self._pending) < before
 
     def is_admin(self, id):
-        return (self._admin[0] == "user") and id == self._admin[1]
+        return id == self._admin[1]
 
     def list(self, scope=None):
         if scope is None:
@@ -176,6 +179,21 @@ def test_add_and_list(client):
     r = client.get(f"{API}/whitelist")
     users = r.json()["users"]
     assert len(users) == 1 and users[0]["id"] == "U123"
+
+
+def test_add_user_scope_translates_to_dm(client):
+    # Regression: the dashboard sends scope="user" but the store's scope is
+    # "dm"; the handler used to pass "user" straight through, so store.add
+    # raised "unknown scope: 'user'" -> 400 and no user could ever be added
+    # from the dashboard. The handler now translates user->dm.
+    r = client.post(f"{API}/whitelist", json={"scope": "user", "id": "Uadd1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert "Uadd1" in [u["id"] for u in client.get(f"{API}/whitelist").json()["users"]]
+    # and remove of a user works too (user -> dm)
+    r = client.delete(f"{API}/whitelist/user/Uadd1")
+    assert r.status_code == 200 and r.json()["removed"] is True
+    assert client.get(f"{API}/whitelist").json()["users"] == []
 
 
 def test_add_invalid_scope(client):
