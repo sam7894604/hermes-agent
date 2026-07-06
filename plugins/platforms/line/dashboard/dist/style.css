@@ -136,6 +136,54 @@
 .hermes-line-chip-x:hover:not(:disabled) { color: var(--destructive, #ef4444); }
 .hermes-line-chip-x:disabled { opacity: 0.4; cursor: default; }
 
+/* --- pending queue ------------------------------------------------------ */
+
+.hermes-line-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hermes-line-pending-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a2a2a);
+  background: var(--muted, #171717);
+}
+
+.hermes-line-pending-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hermes-line-pending-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hermes-line-pending-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground, #6b7280);
+}
+
+.hermes-line-pending-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* --- records ------------------------------------------------------------ */
 
 .hermes-line-records {

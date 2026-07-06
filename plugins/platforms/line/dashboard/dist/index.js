@@ -162,6 +162,57 @@
   }
 
   // -------------------------------------------------------------------------
+  // Pending section — attempts awaiting an approve / ignore decision
+  // -------------------------------------------------------------------------
+
+  function PendingSection(props) {
+    const { pending, loading, busy, onApprove, onIgnore } = props;
+
+    return h(Card, { className: "hermes-line-card" },
+      h(CardContent, { className: "hermes-line-card-body" },
+        h("div", { className: "hermes-line-section-head" },
+          "Pending / 待審清單",
+          h(Badge, { className: "hermes-line-count" }, String((pending || []).length)),
+        ),
+        loading
+          ? h("div", { className: "hermes-line-empty" }, "loading…")
+          : ((pending || []).length === 0
+              ? h("div", { className: "hermes-line-empty" }, "No pending attempts.")
+              : h("div", { className: "hermes-line-pending" },
+                  (pending || []).map(function (p) {
+                    const label = p.name || p.id;
+                    return h("div", { key: p.id, className: "hermes-line-pending-row" },
+                      h("div", { className: "hermes-line-pending-main" },
+                        h("span", { className: "hermes-line-pending-name" }, label),
+                        h(Badge, { className: "hermes-line-count" },
+                          String(p.count == null ? "?" : p.count)),
+                      ),
+                      h("div", { className: "hermes-line-pending-meta" },
+                        h("span", null, (p.platform || "line") + " · " + (p.source_type || "?")),
+                        h("span", null, timeAgo(p.last_seen || p.first_seen)),
+                      ),
+                      h("div", { className: "hermes-line-pending-actions" },
+                        h(Button, {
+                          size: "sm",
+                          disabled: !!busy,
+                          onClick: function () { onApprove(p.id); },
+                        }, "加入白名單 / Approve"),
+                        h(Button, {
+                          size: "sm",
+                          variant: "outline",
+                          disabled: !!busy,
+                          onClick: function () { onIgnore(p.id); },
+                        }, "忽略 / Ignore"),
+                      ),
+                    );
+                  })
+                )
+            ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Records section — LINE communication records (reuses session data)
   // -------------------------------------------------------------------------
 
@@ -235,6 +286,9 @@
     const [wlError, setWlError] = useState(null);
     const [busy, setBusy] = useState(false);
 
+    const [pending, setPending] = useState([]);
+    const [pendLoading, setPendLoading] = useState(true);
+
     const [records, setRecords] = useState([]);
     const [recLoading, setRecLoading] = useState(true);
     const [selected, setSelected] = useState(null);
@@ -273,7 +327,18 @@
         .finally(function () { setRecLoading(false); });
     }, []);
 
-    useEffect(function () { loadWhitelist(); loadRecords(); }, [loadWhitelist, loadRecords]);
+    // ---- pending load -----------------------------------------------------
+    const loadPending = useCallback(function () {
+      setPendLoading(true);
+      return SDK.fetchJSON(`${API}/pending`)
+        .then(function (data) { setPending((data && data.pending) || []); })
+        .catch(function () { setPending([]); })
+        .finally(function () { setPendLoading(false); });
+    }, []);
+
+    useEffect(function () {
+      loadWhitelist(); loadPending(); loadRecords();
+    }, [loadWhitelist, loadPending, loadRecords]);
 
     // ---- add / remove -----------------------------------------------------
     const onAdd = useCallback(function (body) {
@@ -299,6 +364,29 @@
         .finally(function () { setBusy(false); });
     }, [loadWhitelist]);
 
+    // ---- approve / ignore a pending attempt -------------------------------
+    const onApprove = useCallback(function (id) {
+      setBusy(true);
+      SDK.fetchJSON(`${API}/pending/${encodeURIComponent(id)}/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      })
+        .then(function () { return Promise.all([loadPending(), loadWhitelist()]); })
+        .catch(function (e) { setWlError(String(e && e.message || e)); })
+        .finally(function () { setBusy(false); });
+    }, [loadPending, loadWhitelist]);
+
+    const onIgnore = useCallback(function (id) {
+      setBusy(true);
+      SDK.fetchJSON(`${API}/pending/${encodeURIComponent(id)}/ignore`, {
+        method: "POST",
+      })
+        .then(function () { return loadPending(); })
+        .catch(function (e) { setWlError(String(e && e.message || e)); })
+        .finally(function () { setBusy(false); });
+    }, [loadPending]);
+
     // ---- open a record's messages ----------------------------------------
     const onOpen = useCallback(function (sessionId) {
       if (selected === sessionId) { setSelected(null); setMessages([]); return; }
@@ -314,9 +402,16 @@
       h("div", { className: "hermes-line-header" },
         h("h2", { className: "hermes-line-title" }, "LINE Whitelist"),
         h(Button, { size: "sm", variant: "outline", onClick: function () {
-          loadWhitelist(); loadRecords();
+          loadWhitelist(); loadPending(); loadRecords();
         } }, "Refresh"),
       ),
+      h(PendingSection, {
+        pending: pending,
+        loading: pendLoading,
+        busy: busy,
+        onApprove: onApprove,
+        onIgnore: onIgnore,
+      }),
       h(WhitelistSection, {
         data: whitelist,
         onAdd: onAdd,
