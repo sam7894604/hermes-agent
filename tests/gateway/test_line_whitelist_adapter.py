@@ -125,7 +125,23 @@ class TestRouting:
         ad._send_plain.assert_awaited_once()
         assert ad._send_plain.await_args.args[2] == UNAUTH_DM_REPLY
         ad._notify_admin_unauthorized.assert_awaited_once()
-        ad._whitelist.record_unauthorized_attempt.assert_called_once()
+        # attempt logged into the pending queue as a DM source
+        ad._whitelist.record_attempt.assert_called_once()
+        assert ad._whitelist.record_attempt.call_args.kwargs["source_type"] == "dm"
+
+    async def test_unauthorized_group_records_pending(self):
+        ad = _make_adapter()
+        ad._send_plain = AsyncMock()
+        ad._notify_admin_unauthorized = AsyncMock()
+        src = {"type": "group", "groupId": "Cx", "userId": "Uy"}
+        msg = {"type": "text", "id": "m1", "text": "@bot hi",
+               "mention": {"mentionees": [{"isSelf": True}]}}
+        await ad._handle_message_event(_msg_event(src, msg), authorized=False)
+        # group attempt logged into the pending queue (source_type=group)
+        ad._whitelist.record_attempt.assert_called_once()
+        kw = ad._whitelist.record_attempt.call_args.kwargs
+        assert kw["source_type"] == "group"
+        assert ad._whitelist.record_attempt.call_args.args[0] == "Cx"
 
     async def test_unauthorized_group_mention_replies(self):
         ad = _make_adapter()
