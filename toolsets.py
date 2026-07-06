@@ -215,7 +215,13 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
-    
+
+    "line_whitelist": {
+        "description": "LINE whitelist management - approve/list/remove DM & group whitelist entries. Admin-gated (check_fn); off by default; excluded from subagents.",
+        "tools": ["line_whitelist"],
+        "includes": []
+    },
+
 
     "file": {
         "description": "File manipulation tools: read, write, patch (with fuzzy matching), and search (content + files)",
