@@ -18825,6 +18825,9 @@ def _discover_dashboard_plugins() -> list:
     search_dirs = [(d, "user") for d in user_plugin_roots]
     search_dirs += [
         (bundled_root / "memory", "bundled"),
+        # Platform plugins nest their dashboard under plugins/platforms/<name>/;
+        # scan that tier too so e.g. the LINE whitelist dashboard is discovered.
+        (bundled_root / "platforms", "bundled"),
         (bundled_root, "bundled"),
     ]
     # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)``
