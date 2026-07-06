@@ -7680,6 +7680,51 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def send_whitelist_decision(
+        self, chat_id: str, source_type: str, source_id: str,
+        name: str = "", metadata: Optional[dict] = None,
+    ) -> SendResult:
+        """Send an interactive LINE whitelist-decision card (Approve/Ignore/Skip).
+
+        Used by the LINE whitelist ``notify_unauthorized`` bridge when the
+        notify target platform is Discord. Additive — mirrors
+        ``send_exec_approval`` but drives the new ``WhitelistDecisionView``,
+        which calls the shared ``WhitelistStore`` on tap.
+        """
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            who = name or source_id
+            embed = discord.Embed(
+                title="🔔 LINE: unauthorized access attempt",
+                color=discord.Color.orange(),
+            )
+            embed.add_field(name="type", value=str(source_type), inline=True)
+            embed.add_field(name="name", value=str(who), inline=True)
+            embed.add_field(name="id", value=f"`{source_id}`", inline=False)
+
+            view = WhitelistDecisionView(
+                source_type=source_type,
+                source_id=source_id,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+
+            msg = await channel.send(embed=embed, view=view)
+            view._message = msg  # store for on_timeout expiration editing
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
         confirm_id: str, metadata: Optional[dict] = None,
@@ -9063,6 +9108,7 @@ def _define_discord_view_classes() -> None:
     undefined, causing NameError on the first button interaction.
     """
     global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ChoicePickerView, AutoChoiceView
+    global WhitelistDecisionView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -10305,6 +10351,183 @@ def _define_discord_view_classes() -> None:
             if msg:
                 try:
                     await msg.edit(view=self)
+                except Exception:
+                    pass
+
+    class WhitelistDecisionView(discord.ui.View):
+        """Interactive LINE whitelist-decision card (Approve/Ignore/Skip).
+
+        Sent by ``DiscordAdapter.send_whitelist_decision`` when the LINE
+        whitelist ``notify_unauthorized`` bridge targets Discord. Tapping a
+        button hits the shared ``WhitelistStore`` (approve/ignore) or is a
+        no-op (skip). Auth mirrors ``ExecApprovalView`` — the adapter's
+        user/role allowlist — plus a whitelist-admin gate on mutations.
+
+        Additive and self-contained: shares no state with the approval flows.
+        The LINE plugin may be absent in some deployments, so every store
+        touch is guarded and degrades to an ephemeral error rather than
+        crashing the interaction handler.
+        """
+
+        def __init__(
+            self,
+            source_type: str,
+            source_id: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=86400)  # 24h — admin may not be online
+            self.source_type = source_type
+            self.source_id = source_id
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+        def _check_auth(self, interaction: "discord.Interaction") -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        @staticmethod
+        def _load_store():
+            """Best-effort WhitelistStore; None if the LINE plugin is absent."""
+            try:
+                from plugins.platforms.line.whitelist_store import WhitelistStore
+                return WhitelistStore()
+            except Exception:
+                return None
+
+        async def _finish(
+            self, interaction: "discord.Interaction",
+            color, footer: str,
+        ):
+            """Recolor the embed, disable buttons, and edit the message."""
+            self.resolved = True
+            embed = (
+                interaction.message.embeds[0]
+                if interaction.message.embeds else None
+            )
+            if embed is not None:
+                embed.color = color
+                embed.set_footer(text=footer)
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+
+        async def _guard(self, interaction: "discord.Interaction") -> bool:
+            """Common pre-checks; returns True if the action may proceed."""
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This request has already been resolved~", ephemeral=True,
+                )
+                return False
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized~", ephemeral=True,
+                )
+                return False
+            return True
+
+        async def _admin_ok(self, interaction, store) -> bool:
+            """Whitelist-admin gate for mutating actions (approve/ignore)."""
+            try:
+                if store is not None and store.is_admin(str(interaction.user.id)):
+                    return True
+            except Exception:
+                pass
+            await interaction.response.send_message(
+                "You're not a whitelist admin~", ephemeral=True,
+            )
+            return False
+
+        @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.green)
+        async def approve(self, interaction, button):
+            if not await self._guard(interaction):
+                return
+            store = self._load_store()
+            if store is None:
+                await interaction.response.send_message(
+                    "Whitelist unavailable~", ephemeral=True,
+                )
+                return
+            if not await self._admin_ok(interaction, store):
+                return
+            try:
+                res = store.approve_pending(
+                    self.source_id, added_by=str(interaction.user.id),
+                )
+            except Exception as exc:
+                logger.error("Discord whitelist approve failed: %s", exc)
+                await interaction.response.send_message(
+                    "Approve failed~", ephemeral=True,
+                )
+                return
+            if isinstance(res, dict) and res.get("approved"):
+                scope = res.get("scope")
+                footer = (
+                    f"✅ Approved{f' ({scope})' if scope else ''} "
+                    f"by {interaction.user.display_name}"
+                )
+                await self._finish(interaction, discord.Color.green(), footer)
+            else:
+                reason = res.get("reason") if isinstance(res, dict) else ""
+                await interaction.response.send_message(
+                    f"Not approved{f': {reason}' if reason else ''}~",
+                    ephemeral=True,
+                )
+
+        @discord.ui.button(label="⛔ Ignore", style=discord.ButtonStyle.red)
+        async def ignore(self, interaction, button):
+            if not await self._guard(interaction):
+                return
+            store = self._load_store()
+            if store is None:
+                await interaction.response.send_message(
+                    "Whitelist unavailable~", ephemeral=True,
+                )
+                return
+            if not await self._admin_ok(interaction, store):
+                return
+            try:
+                ok = store.ignore_pending(self.source_id)
+            except Exception as exc:
+                logger.error("Discord whitelist ignore failed: %s", exc)
+                await interaction.response.send_message(
+                    "Ignore failed~", ephemeral=True,
+                )
+                return
+            if ok:
+                await self._finish(
+                    interaction, discord.Color.greyple(),
+                    f"⛔ Ignored by {interaction.user.display_name}",
+                )
+            else:
+                await interaction.response.send_message(
+                    "Nothing to ignore~", ephemeral=True,
+                )
+
+        @discord.ui.button(label="➖ Skip", style=discord.ButtonStyle.grey)
+        async def skip(self, interaction, button):
+            if not await self._guard(interaction):
+                return
+            # Skip is a no-op — just acknowledge and close the card.
+            await self._finish(
+                interaction, discord.Color.greyple(),
+                f"➖ Skipped by {interaction.user.display_name}",
+            )
+
+        async def on_timeout(self):
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed is not None:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
 
