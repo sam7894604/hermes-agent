@@ -387,13 +387,16 @@ def test_records_filters_line_sessions(client, monkeypatch):
 
     class _FakeDB:
         def list_sessions_rich(self, **kw):
+            # REAL session keys have the platform as a MIDDLE segment
+            # (agent:main:line:…), not a prefix — the regression the old
+            # startswith("line:") filter missed.
             return [
-                {"session_id": "s1", "session_key": "line:U123", "title": "LINE chat",
-                 "message_count": 3, "last_active": 100, "started_at": 90},
-                {"session_id": "s2", "session_key": "discord:42", "title": "Discord",
-                 "message_count": 5, "last_active": 200, "started_at": 190},
-                {"session_id": "s3", "session_key": "line:C55", "title": "LINE group",
-                 "message_count": 1, "last_active": 300, "started_at": 290},
+                {"session_id": "s1", "session_key": "agent:main:line:dm:U123",
+                 "title": "LINE chat", "message_count": 3, "last_active": 100, "started_at": 90},
+                {"session_id": "s2", "session_key": "agent:main:discord:channel:42",
+                 "title": "Discord", "message_count": 5, "last_active": 200, "started_at": 190},
+                {"session_id": "s3", "session_key": "agent:main:line:group:C55",
+                 "title": "LINE group", "message_count": 1, "last_active": 300, "started_at": 290},
             ]
 
         def session_count(self, **kw):
@@ -417,7 +420,7 @@ def test_records_filters_line_sessions(client, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     keys = [rec["session_key"] for rec in body["records"]]
-    assert keys == ["line:U123", "line:C55"]  # discord filtered out
+    assert keys == ["agent:main:line:dm:U123", "agent:main:line:group:C55"]  # discord filtered out
     assert body["total_line_sessions"] == 2
 
 
