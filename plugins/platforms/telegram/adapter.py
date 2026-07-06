@@ -6526,7 +6526,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
             if store is not None:
                 try:
-                    if not store.is_admin(caller_id):
+                    # Cross-platform admin: a LINE whitelist admin OR the
+                    # Telegram recipient of the notify card (whose Telegram id
+                    # won't match the LINE admin list). is_card_admin covers
+                    # both; fall back to is_admin if an older store lacks it.
+                    checker = getattr(store, "is_card_admin", None)
+                    _is_admin = (
+                        checker("telegram", caller_id) if checker
+                        else store.is_admin(caller_id)
+                    )
+                    if not _is_admin:
                         await query.answer(
                             text="⛔ You are not a whitelist admin."
                         )

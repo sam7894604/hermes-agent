@@ -9994,10 +9994,17 @@ def _define_discord_view_classes() -> None:
             return True
 
         async def _admin_ok(self, interaction, store) -> bool:
-            """Whitelist-admin gate for mutating actions (approve/ignore)."""
+            """Whitelist-admin gate for mutating actions (approve/ignore).
+
+            Cross-platform: a LINE whitelist admin OR the Discord recipient of
+            the notify card (whose Discord id won't match the LINE admin list).
+            """
             try:
-                if store is not None and store.is_admin(str(interaction.user.id)):
-                    return True
+                if store is not None:
+                    caller = str(interaction.user.id)
+                    checker = getattr(store, "is_card_admin", None)
+                    if checker("discord", caller) if checker else store.is_admin(caller):
+                        return True
             except Exception:
                 pass
             await interaction.response.send_message(
