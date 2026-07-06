@@ -487,6 +487,18 @@ def ignore_pending(id: str):
 _LINE_KEY_PREFIX = "line:"
 
 
+def _is_line_session_key(key: Any) -> bool:
+    """True for LINE session keys.
+
+    Keys look like ``agent:main:line:group:C…`` — the platform is a *middle*
+    segment, not a prefix. Match the ``:line:`` segment (and tolerate a bare
+    ``line:`` prefix for any simple/legacy keys). The old ``startswith("line:")``
+    check matched nothing, so the records panel always showed "No LINE sessions".
+    """
+    k = str(key or "")
+    return ":line:" in k or k.startswith(_LINE_KEY_PREFIX)
+
+
 @router.get("/records")
 def list_records(
     limit: int = Query(50, ge=1, le=500),
@@ -539,7 +551,7 @@ def list_records(
         )
         line_rows = [
             r for r in rows
-            if str(r.get("session_key") or "").startswith(_LINE_KEY_PREFIX)
+            if _is_line_session_key(r.get("session_key"))
         ]
         page = line_rows[offset: offset + limit]
         records = [
