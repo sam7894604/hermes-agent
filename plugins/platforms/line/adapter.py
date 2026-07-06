@@ -134,6 +134,11 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_LOADING_URL = "https://api.line.me/v2/bot/chat/loading/start"
 LINE_CONTENT_URL_FMT = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 LINE_BOT_INFO_URL = "https://api.line.me/v2/bot/info"
+# Name resolution (whitelist subsystem — display names for Dashboard / observed context)
+LINE_PROFILE_URL_FMT = "https://api.line.me/v2/bot/profile/{user_id}"
+LINE_GROUP_SUMMARY_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/summary"
+LINE_GROUP_MEMBER_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
+LINE_ROOM_MEMBER_URL_FMT = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
 
 # LINE Messaging API hard limits
 LINE_PER_BUBBLE_CHARS = 5000  # Hard limit per text message object
@@ -491,6 +496,26 @@ def _allowed_for_source(
     return False
 
 
+def _bot_mentioned(msg: Dict[str, Any], bot_user_id: Optional[str]) -> bool:
+    """True if this text message @-mentions the bot.
+
+    LINE puts mentions at ``message.mention.mentionees[]``; each entry carries
+    ``isSelf`` (bool) and ``userId``. A ``type == "all"`` (@everyone) entry is
+    NOT treated as addressing the bot specifically.
+    """
+    mention = (msg or {}).get("mention") or {}
+    for m in mention.get("mentionees", []) or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("type") == "all":
+            continue
+        if m.get("isSelf"):
+            return True
+        if bot_user_id and m.get("userId") == bot_user_id:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # LINE Reply / Push HTTP client
 # ---------------------------------------------------------------------------
@@ -579,6 +604,52 @@ class _LineClient:
                     return data.get("userId")
         except Exception:
             return None
+
+    async def _get_json_field(self, url: str, field: str) -> Optional[str]:
+        """Shared GET helper for name-resolution endpoints. Best-effort."""
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=10.0)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                async with session.get(url, headers=self._headers) as resp:
+                    if resp.status >= 400:
+                        return None
+                    data = await resp.json()
+                    return data.get(field)
+        except Exception:
+            return None
+
+    async def get_profile(self, user_id: str) -> Optional[str]:
+        """Display name for a 1:1 / followed user (``GET /v2/bot/profile/{id}``)."""
+        if not user_id:
+            return None
+        return await self._get_json_field(
+            LINE_PROFILE_URL_FMT.format(user_id=user_id), "displayName"
+        )
+
+    async def get_group_summary(self, group_id: str) -> Optional[str]:
+        """Group name (``GET /v2/bot/group/{id}/summary``)."""
+        if not group_id:
+            return None
+        return await self._get_json_field(
+            LINE_GROUP_SUMMARY_URL_FMT.format(group_id=group_id), "groupName"
+        )
+
+    async def get_member_name(
+        self, chat_id: str, user_id: str, *, chat_type: str = "group"
+    ) -> Optional[str]:
+        """Display name of a member inside a group/room.
+
+        LINE's plain ``/profile`` endpoint does not work for arbitrary group
+        members — the group/room member endpoint is required.
+        """
+        if not chat_id or not user_id:
+            return None
+        if chat_type == "room":
+            url = LINE_ROOM_MEMBER_URL_FMT.format(room_id=chat_id, user_id=user_id)
+        else:
+            url = LINE_GROUP_MEMBER_URL_FMT.format(group_id=chat_id, user_id=user_id)
+        return await self._get_json_field(url, "displayName")
 
 
 # ---------------------------------------------------------------------------
