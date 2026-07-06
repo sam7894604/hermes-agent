@@ -51,14 +51,33 @@ def _resolve_notify_target(store: WhitelistStore, config: Any) -> Optional[str]:
     return None
 
 
-def _resolve_line_pconfig(config: Any) -> Any:
-    """Best-effort fetch of the LINE PlatformConfig object for the sender."""
-    try:
-        from gateway.config import Platform
+# Platform prefixes an ``unauthorized_notify`` / home-channel target may carry,
+# e.g. ``"telegram:521703862"`` means "send via Telegram to chat 521703862".
+_KNOWN_TARGET_PLATFORMS = {
+    "line", "telegram", "discord", "slack", "mattermost", "webhook",
+    "yuanbao", "weixin", "teams",
+}
 
+
+def _parse_target(target: str) -> "tuple[str, str]":
+    """Split a delivery target into ``(platform_name, chat_id)``.
+
+    ``"telegram:521703862"`` → ``("telegram", "521703862")``. A bare id with no
+    known-platform prefix defaults to the LINE platform (home-channel case).
+    """
+    if ":" in target:
+        head, rest = target.split(":", 1)
+        if head in _KNOWN_TARGET_PLATFORMS and rest:
+            return head, rest
+    return "line", target
+
+
+def _resolve_pconfig(config: Any, platform: Any) -> Any:
+    """Best-effort fetch of a PlatformConfig object for the sender."""
+    try:
         platforms = getattr(config, "platforms", None)
         if isinstance(platforms, dict):
-            return platforms.get(Platform("line"))
+            return platforms.get(platform)
     except Exception:
         logger.debug("notify_unauthorized: pconfig resolution failed", exc_info=True)
     return None
@@ -102,12 +121,16 @@ async def notify_unauthorized(
         from tools.send_message_tool import _send_to_platform
         from gateway.config import Platform
 
-        pconfig = _resolve_line_pconfig(config)
+        # Route to the target's platform (``telegram:...`` sends via Telegram,
+        # a bare id falls back to the LINE home channel).
+        plat_name, chat_id = _parse_target(target)
+        platform = Platform(plat_name)
+        pconfig = _resolve_pconfig(config, platform)
 
         await _send_to_platform(
-            Platform("line"),
+            platform,
             pconfig,
-            target,
+            chat_id,
             message,
         )
 
