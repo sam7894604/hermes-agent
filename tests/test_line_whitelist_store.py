@@ -322,6 +322,31 @@ def test_notify_unauthorized_uses_explicit_override_target(monkeypatch):
     assert sent == ["Uoverride"]
 
 
+def test_notify_unauthorized_cross_platform_target(monkeypatch):
+    # ``telegram:521703862`` must route via the Telegram platform to chat
+    # ``521703862`` — not send a LINE message to a literal "telegram:..." id.
+    store, _ = make_store({"unauthorized_notify": "telegram:521703862"})
+    sent = []
+
+    async def fake_send(platform, pconfig, chat_id, message, **kw):
+        sent.append((getattr(platform, "value", str(platform)), chat_id))
+
+    import tools.send_message_tool as smt
+
+    monkeypatch.setattr(smt, "_send_to_platform", fake_send, raising=False)
+
+    ok = _run(
+        whitelist_notify.notify_unauthorized(
+            store, FakeGatewayConfig(), source_type="group", source_id="Cnew"
+        )
+    )
+    assert ok is True
+    assert len(sent) == 1
+    plat, chat = sent[0]
+    assert "telegram" in str(plat).lower()
+    assert chat == "521703862"
+
+
 def test_notify_unauthorized_swallows_send_errors(monkeypatch):
     store, _ = make_store({})
 
