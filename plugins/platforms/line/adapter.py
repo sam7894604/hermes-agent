@@ -904,6 +904,9 @@ class LineAdapter(BasePlatformAdapter):
         self._cache = RequestCache()
         self._dedup = _MessageDeduplicator()
         self._bot_user_id: Optional[str] = None
+        # One-shot flag so the fail-open mention-gate warning is logged once
+        # per connection, not once per inbound message.
+        self._mention_gate_warned: bool = False
         self._lock_key: Optional[str] = None
 
         # Media state
@@ -950,11 +953,22 @@ class LineAdapter(BasePlatformAdapter):
         # If the call fails (offline tests, transient 5xx) we fall back to
         # not filtering self-events; the cost is minor (LINE doesn't
         # actually echo our own messages back).
+        self._mention_gate_warned = False  # fresh warning per connection cycle
         try:
             self._bot_user_id = await self._client.get_bot_user_id()
         except Exception as exc:
             logger.debug("LINE: get_bot_user_id failed: %s", exc)
             self._bot_user_id = None
+        if self._bot_user_id:
+            logger.info(
+                "LINE: bot userId resolved (%s…) — @mention gate active",
+                self._bot_user_id[:8],
+            )
+        else:
+            logger.warning(
+                "LINE: bot userId NOT resolved at connect — @mention gate will "
+                "fail-open (authorized groups reply without @mention)."
+            )
 
         # Spin up the aiohttp webhook server.
         try:
@@ -1173,7 +1187,16 @@ class LineAdapter(BasePlatformAdapter):
                     )
                 return
             # authorized group/room
-            if self._group_requires_mention(chat_id) and not mentioned:
+            requires_mention = self._group_requires_mention(chat_id)
+            if requires_mention and self._bot_user_id is None:
+                # SAFETY FAIL-OPEN: matching LINE mentionees requires our own
+                # bot userId, fetched via GET /v2/bot/info at connect(). If that
+                # failed, _bot_mentioned() can NEVER return True — enforcing the
+                # mention gate here would silence every message in an authorized
+                # group (over-correction). Fall back to pre-whitelist behaviour
+                # (trigger the agent) and warn once so the operator can fix it.
+                self._warn_mention_gate_unavailable()
+            elif requires_mention and not mentioned:
                 # Passive observe-record — record as context, do NOT trigger. (§6)
                 await self._observe_record(
                     source=source, chat_id=chat_id, chat_type=chat_type,
@@ -1181,7 +1204,7 @@ class LineAdapter(BasePlatformAdapter):
                     message_id=message_id,
                 )
                 return
-            # mentioned (or requires_mention disabled) → trigger below
+            # mentioned / requires_mention disabled / gate unavailable → trigger
 
         # ---- Trigger path: media + build event + handle_message ------------
         # Handle media inbound — fetch the binary, cache it, and surface a
@@ -1278,6 +1301,21 @@ class LineAdapter(BasePlatformAdapter):
             return bool(self._whitelist.requires_mention(chat_id))
         except Exception:
             return True
+
+    def _warn_mention_gate_unavailable(self) -> None:
+        """Warn (once per connection) that the @mention gate cannot be enforced
+        because our own bot userId is unknown, so it has failed open."""
+        if self._mention_gate_warned:
+            return
+        self._mention_gate_warned = True
+        logger.warning(
+            "LINE: requires_mention is enabled but the bot userId is unknown "
+            "(GET /v2/bot/info failed at connect) — @mention detection is "
+            "impossible, so the mention gate is DISABLED (fail-open): authorized "
+            "groups will keep receiving replies WITHOUT an @mention. Restore "
+            "connectivity to https://api.line.me/v2/bot/info (check "
+            "LINE_CHANNEL_ACCESS_TOKEN) and reconnect to re-enable mention gating."
+        )
 
     async def _send_plain(self, chat_id: str, reply_token: str, text: str) -> None:
         """Send one plain-text bubble via reply (preferred) or push fallback."""
