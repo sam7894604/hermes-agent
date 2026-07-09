@@ -180,6 +180,30 @@ class TestRouting:
         ad.handle_message.assert_not_called()
         ad._observe_record.assert_awaited_once()
 
+    async def test_authorized_group_no_mention_failopen_when_bot_id_unknown(self):
+        # SAFETY: if get_bot_user_id() failed at connect (_bot_user_id is None),
+        # _bot_mentioned can never be True. The mention gate must FAIL-OPEN —
+        # trigger the agent (pre-whitelist behaviour) rather than silence the
+        # whole authorized group — and warn exactly once.
+        ad = _make_adapter()
+        ad._bot_user_id = None  # simulate GET /v2/bot/info failure
+        ad._observe_record = AsyncMock()
+        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
+        await ad._handle_message_event(
+            _msg_event(src, {"type": "text", "id": "m1", "text": "no at, bot id unknown"}),
+            authorized=True,
+        )
+        ad._observe_record.assert_not_awaited()   # NOT silenced
+        ad.handle_message.assert_awaited_once()    # triggered (fail-open)
+        assert ad._mention_gate_warned is True     # warned
+        # second message must not re-warn (once-per-connection)
+        ad.handle_message.reset_mock()
+        await ad._handle_message_event(
+            _msg_event(src, {"type": "text", "id": "m2", "text": "again"}),
+            authorized=True,
+        )
+        ad.handle_message.assert_awaited_once()
+
     async def test_authorized_group_mention_triggers(self):
         ad = _make_adapter()
         src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
