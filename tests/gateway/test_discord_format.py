@@ -24,7 +24,11 @@ def _make_discord_adapter():
 
 class TestDiscordFormatMessage:
 
-    def test_table_converted_to_bullets(self):
+    def test_table_rendered_as_code_block(self):
+        # This fork branch's table→image feature supersedes upstream's
+        # convert_table_to_bullets: format_message (the text fallback used when
+        # image rendering is unavailable) re-renders each table as an aligned
+        # monospace code block, keeping it inline within the message.
         adapter = _make_discord_adapter()
         text = (
             "Results:\n\n"
@@ -35,12 +39,11 @@ class TestDiscordFormatMessage:
             "\nDone."
         )
         out = adapter.format_message(text)
-        assert "**Alice**" in out
-        assert "• Score: 95" in out
-        assert "**Bob**" in out
-        assert "• Score: 80" in out
+        assert "```" in out                       # rendered as a code block
+        assert "Alice" in out and "95" in out      # data preserved
+        assert "Bob" in out and "80" in out
         assert out.startswith("Results:")
         assert out.rstrip().endswith("Done.")
-        assert "|---" not in out
+        assert "**Alice**" not in out              # not the old bullet form
 
 
