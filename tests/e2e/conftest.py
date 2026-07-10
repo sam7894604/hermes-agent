@@ -31,6 +31,12 @@ def _ensure_telegram_mock():
     """Install mock telegram modules so TelegramAdapter can be imported."""
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return # Real library installed
+    try:
+        import discord as _real_discord  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return  # Real library installed but not yet imported - prefer it
 
     telegram_mod = MagicMock()
     telegram_mod.Update = MagicMock()
