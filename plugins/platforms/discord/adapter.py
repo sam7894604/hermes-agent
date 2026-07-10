@@ -12,6 +12,7 @@ Uses discord.py library for:
 import asyncio
 import datetime as dt
 import hashlib
+import inspect
 import io
 import json
 import logging
