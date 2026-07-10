@@ -92,7 +92,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
-    cache_image_from_bytes,
+    cache_media_bytes,
 )
 from gateway.config import Platform
 
@@ -1558,14 +1558,38 @@ class LineAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("LINE: failed to fetch %s content for %s: %s", msg_type, message_id, exc)
             return None
+        # Route each media kind to its own validated cache. Audio/video/file
+        # must NOT go through the image cache — cache_image_from_bytes()
+        # magic-byte-validates and rejects non-image bytes, which silently
+        # dropped LINE voice clips ("Refusing to cache non-image data as .m4a")
+        # so they never reached STT and degraded to a bare "[audio]" placeholder.
+        # cache_media_bytes() dispatches by kind: audio -> cache_audio_from_bytes
+        # (no image validation), keeping the file available for the gateway's
+        # VOICE -> STT (Groq Whisper) pipeline. §7 media policy is unchanged
+        # (kind/msg_type still drives observe-record retention/filtering).
         ext = {
             "image": ".jpg",
             "audio": ".m4a",
             "video": ".mp4",
             "file": ".bin",
         }.get(msg_type, ".bin")
+        kind = {
+            "image": "image",
+            "audio": "audio",
+            "video": "video",
+            "file": "document",
+        }.get(msg_type, "document")
         try:
-            return cache_image_from_bytes(data, ext=ext)
+            cached = cache_media_bytes(
+                data, filename=f"line_{msg_type}{ext}", default_kind=kind
+            )
+            if cached is None:
+                logger.warning(
+                    "LINE: %s payload failed caching/validation (message %s)",
+                    msg_type, message_id,
+                )
+                return None
+            return cached.path
         except Exception as exc:
             logger.warning("LINE: failed to cache %s payload: %s", msg_type, exc)
             return None
