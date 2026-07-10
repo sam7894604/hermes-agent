@@ -674,3 +674,50 @@ class TestMessageTypeMapping:
     def test_unknown_type_falls_back_to_text(self):
         MessageType = _line.MessageType
         assert _line._LINE_MESSAGE_TYPES.get("flex", MessageType.TEXT) == MessageType.TEXT
+
+
+# ---------------------------------------------------------------------------
+# 10. Inbound media caching routes by kind (audio must NOT hit the image cache)
+# ---------------------------------------------------------------------------
+
+class TestDownloadMediaRouting:
+    """Regression guard for the voice-clip bug: _download_media() used
+    cache_image_from_bytes() for EVERY kind, so LINE .m4a voice notes were
+    magic-byte-rejected ("Refusing to cache non-image data as .m4a"), returned
+    None, and degraded to a bare "[audio]" placeholder that never reached STT.
+    Each kind must now route to its own cache via cache_media_bytes()."""
+
+    def _adapter(self, audio_bytes):
+        from gateway.config import PlatformConfig
+        ad = LineAdapter(PlatformConfig(enabled=True, extra={
+            "channel_access_token": "t", "channel_secret": "s",
+        }))
+        ad._client = MagicMock()
+        ad._client.fetch_content = AsyncMock(return_value=audio_bytes)
+        return ad
+
+    def test_audio_m4a_is_cached_not_rejected(self):
+        # Realistic (non-image) m4a header — the old image guard would reject it.
+        m4a = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42isom" + b"\x00" * 64
+        ad = self._adapter(m4a)
+        path = asyncio.run(ad._download_media("m-1", "audio"))
+        assert path is not None, "audio must be cached, not rejected as non-image"
+        assert path.endswith(".m4a")
+        import os
+        assert os.path.exists(path)
+        assert os.path.getsize(path) == len(m4a)
+
+    def test_image_still_validates_and_caches(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # valid PNG magic
+        ad = self._adapter(png)
+        path = asyncio.run(ad._download_media("m-2", "image"))
+        assert path is not None and path.endswith(".jpg")
+
+    def test_fetch_failure_returns_none(self):
+        from gateway.config import PlatformConfig
+        ad = LineAdapter(PlatformConfig(enabled=True, extra={
+            "channel_access_token": "t", "channel_secret": "s",
+        }))
+        ad._client = MagicMock()
+        ad._client.fetch_content = AsyncMock(side_effect=RuntimeError("boom"))
+        assert asyncio.run(ad._download_media("m-3", "audio")) is None
