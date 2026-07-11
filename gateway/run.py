@@ -15334,6 +15334,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 context_note = _build_document_context_note(display_name, agent_path, mtype)
                 message_text = f"{context_note}\n\n{message_text}"
 
+                # Reliable, gateway-side PDF extraction: inline the content so
+                # the agent gets it WITHOUT depending on the model to run a tool.
+                # Text-layer PDFs extract instantly (pymupdf); scanned PDFs fall
+                # back to render + vision. Best-effort — never breaks the flow.
+                try:
+                    _pdf_inline = await self._auto_extract_pdf(path, display_name)
+                    if _pdf_inline:
+                        message_text = f"{message_text}\n\n{_pdf_inline}"
+                except Exception as _pdf_exc:
+                    logger.debug("Auto-PDF extraction failed for %s: %s", path, _pdf_exc)
+
         # Discord: surface the triggering message id per-turn on the user
         # message rather than in the cached system prompt. message_id changes
         # every turn, so baking it into build_session_context_prompt() would
@@ -20583,6 +20594,108 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return f"{prefix}\n\n{user_text}"
             return prefix
         return user_text
+
+    async def _auto_extract_pdf(self, real_path: str, display_name: str) -> Optional[str]:
+        """Extract PDF content at gateway time so it reaches the agent inline —
+        reliable and automatic, not left to the model to decide whether to run a
+        tool. Text-layer PDFs are read with pymupdf (free, instant); a truly
+        scanned PDF (no text layer) falls back to rendering each page and reading
+        it with the vision auxiliary. Best-effort: returns an inlineable string,
+        or None when the file isn't a PDF, pymupdf is unavailable, or it fails."""
+        _MIN_CHARS, _MAX_CHARS, _MAX_PAGES = 24, 20000, 8
+        # Confirm PDF by magic bytes — also catches legacy ".bin" caches whose
+        # real filename was lost before the LINE filename fix.
+        try:
+            with open(real_path, "rb") as _f:
+                if _f.read(5) != b"%PDF-":
+                    return None
+        except Exception:
+            return None
+        try:
+            import pymupdf
+        except Exception:
+            logger.debug("Auto-PDF: pymupdf unavailable; skipping inline extraction")
+            return None
+        try:
+            doc = pymupdf.open(real_path)
+        except Exception as exc:
+            logger.debug("Auto-PDF: open '%s' failed: %s", real_path, exc)
+            return None
+        try:
+            full_text = "\n".join(pg.get_text() for pg in doc).strip()
+            if len(full_text) >= _MIN_CHARS:
+                trunc = " (truncated)" if len(full_text) > _MAX_CHARS else ""
+                logger.info(
+                    "Auto-PDF: inlined %d chars from text-layer PDF '%s' (%d page(s))",
+                    len(full_text), display_name, doc.page_count,
+                )
+                return (
+                    f"[Auto-extracted text of the attached PDF '{display_name}' "
+                    f"({doc.page_count} page(s)){trunc}:]\n{full_text[:_MAX_CHARS]}"
+                )
+            logger.info(
+                "Auto-PDF: '%s' has no text layer (scanned); vision-reading up to %d page(s)",
+                display_name, min(doc.page_count, _MAX_PAGES),
+            )
+            return await self._vision_read_scanned_pdf(doc, display_name, _MAX_PAGES)
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+    async def _vision_read_scanned_pdf(
+        self, doc, display_name: str, max_pages: int
+    ) -> Optional[str]:
+        """Render each page of a scanned PDF and transcribe it with the vision
+        auxiliary (whatever ``auxiliary.vision`` resolves to). Returns the joined
+        transcription, or None if nothing could be read."""
+        import uuid
+        try:
+            from tools.vision_tools import vision_analyze_tool
+            from gateway.platforms.base import get_image_cache_dir
+        except Exception as exc:
+            logger.debug("Auto-PDF: vision deps unavailable: %s", exc)
+            return None
+        prompt = (
+            "This is one page of a scanned document or receipt. Transcribe ALL "
+            "readable text verbatim — names, dates, amounts, totals, line items — "
+            "preserving numbers and currency exactly. If it is a table, keep the "
+            "rows aligned."
+        )
+        pages: List[str] = []
+        for i in range(min(doc.page_count, max_pages)):
+            try:
+                pix = doc[i].get_pixmap(dpi=170)
+                png_path = str(
+                    get_image_cache_dir() / f"pdfpage_{uuid.uuid4().hex[:12]}.png"
+                )
+                pix.save(png_path)
+            except Exception as exc:
+                logger.debug("Auto-PDF: render page %d failed: %s", i + 1, exc)
+                continue
+            try:
+                res = await vision_analyze_tool(png_path, prompt)
+                data = json.loads(res) if isinstance(res, str) else (res or {})
+                analysis = (data.get("analysis") or "").strip() if isinstance(data, dict) else ""
+                if isinstance(data, dict) and data.get("success") and analysis:
+                    pages.append(f"--- Page {i + 1} ---\n{analysis}")
+            except Exception as exc:
+                logger.debug("Auto-PDF: vision page %d failed: %s", i + 1, exc)
+        if not pages:
+            return None
+        extra = (
+            ""
+            if doc.page_count <= max_pages
+            else f" (first {max_pages} of {doc.page_count} pages)"
+        )
+        logger.info(
+            "Auto-PDF: vision-read %d page(s) of scanned '%s'", len(pages), display_name
+        )
+        return (
+            f"[Auto-read scanned PDF '{display_name}'{extra} via vision:]\n"
+            + "\n\n".join(pages)
+        )
 
     async def _enrich_message_with_transcription(
         self,
