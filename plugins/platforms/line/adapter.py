@@ -1192,15 +1192,22 @@ class LineAdapter(BasePlatformAdapter):
         if msg_type == "text":
             text = msg.get("text", "") or ""
         elif msg_type in ("image", "audio", "video", "file"):
+            file_name = msg.get("fileName") or msg.get("file_name") or ""
             local_path, media_type = await self._download_media(
                 message_id,
                 msg_type,
-                filename=msg.get("fileName") or msg.get("file_name"),
+                filename=file_name or None,
             )
             if local_path:
                 media_urls.append(local_path)
                 media_types.append(media_type)
-            text = f"[{msg_type}]"
+            # Surface the real filename in the placeholder so the agent can
+            # refer to the document naturally (e.g. "[file: receipt.pdf]").
+            text = (
+                f"[file: {file_name}]"
+                if (msg_type == "file" and file_name)
+                else f"[{msg_type}]"
+            )
         elif msg_type == "sticker":
             keywords = msg.get("keywords") or []
             text = f"[sticker: {', '.join(keywords)}]" if keywords else "[sticker]"
