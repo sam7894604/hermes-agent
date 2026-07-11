@@ -1145,11 +1145,21 @@ class LineAdapter(BasePlatformAdapter):
         if msg_type == "text":
             text = msg.get("text", "") or ""
         elif msg_type in {"image", "audio", "video", "file"}:
-            local_path = await self._download_media(message_id, msg_type)
-            if local_path:
+            file_name = msg.get("fileName", "") if msg_type == "file" else ""
+            downloaded = await self._download_media(
+                message_id, msg_type, file_name=file_name
+            )
+            if downloaded:
+                local_path, cached_mime = downloaded
                 media_urls.append(local_path)
-                media_types.append(msg_type)
-            text = f"[{msg_type}]"
+                # Surface the real MIME (e.g. application/pdf) so the gateway's
+                # document pipeline recognises the type; fall back to the kind.
+                media_types.append(cached_mime or msg_type)
+            text = (
+                f"[file: {file_name}]"
+                if (msg_type == "file" and file_name)
+                else f"[{msg_type}]"
+            )
         elif msg_type == "sticker":
             keywords = msg.get("keywords") or []
             text = f"[sticker: {', '.join(keywords)}]" if keywords else "[sticker]"
@@ -1550,7 +1560,17 @@ class LineAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
-    async def _download_media(self, message_id: str, msg_type: str) -> Optional[str]:
+    async def _download_media(
+        self, message_id: str, msg_type: str, *, file_name: str = ""
+    ) -> Optional[Tuple[str, str]]:
+        """Fetch inbound media, cache it by kind, and return ``(path, mime)``.
+
+        For ``file`` messages the LINE webhook carries the real ``fileName`` —
+        we keep it so the cache preserves the true extension (e.g. ``.pdf``) and
+        MIME (``application/pdf``) instead of an anonymous ``.bin``. That lets
+        the gateway's document pipeline recognize + auto-extract PDFs. Other
+        kinds use a synthetic name. Returns ``None`` on fetch/cache failure.
+        """
         if not self._client or not message_id:
             return None
         try:
@@ -1567,21 +1587,31 @@ class LineAdapter(BasePlatformAdapter):
         # (no image validation), keeping the file available for the gateway's
         # VOICE -> STT (Groq Whisper) pipeline. §7 media policy is unchanged
         # (kind/msg_type still drives observe-record retention/filtering).
-        ext = {
-            "image": ".jpg",
-            "audio": ".m4a",
-            "video": ".mp4",
-            "file": ".bin",
-        }.get(msg_type, ".bin")
         kind = {
             "image": "image",
             "audio": "audio",
             "video": "video",
             "file": "document",
         }.get(msg_type, "document")
+        if msg_type == "file" and file_name:
+            # Preserve the real filename so the cache keeps its extension +
+            # a proper MIME (e.g. receipt.pdf / application/pdf) instead of a
+            # typeless ".bin" the agent can't recognise.
+            cache_name = file_name
+            mime_hint, _ = mimetypes.guess_type(file_name)
+            mime_hint = mime_hint or ""
+        else:
+            ext = {
+                "image": ".jpg",
+                "audio": ".m4a",
+                "video": ".mp4",
+                "file": ".bin",
+            }.get(msg_type, ".bin")
+            cache_name = f"line_{msg_type}{ext}"
+            mime_hint = ""
         try:
             cached = cache_media_bytes(
-                data, filename=f"line_{msg_type}{ext}", default_kind=kind
+                data, filename=cache_name, mime_type=mime_hint, default_kind=kind
             )
             if cached is None:
                 logger.warning(
@@ -1589,7 +1619,7 @@ class LineAdapter(BasePlatformAdapter):
                     msg_type, message_id,
                 )
                 return None
-            return cached.path
+            return cached.path, cached.media_type
         except Exception as exc:
             logger.warning("LINE: failed to cache %s payload: %s", msg_type, exc)
             return None
