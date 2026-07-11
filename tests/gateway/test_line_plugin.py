@@ -700,7 +700,7 @@ class TestDownloadMediaRouting:
         # Realistic (non-image) m4a header — the old image guard would reject it.
         m4a = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42isom" + b"\x00" * 64
         ad = self._adapter(m4a)
-        path = asyncio.run(ad._download_media("m-1", "audio"))
+        path, mime = asyncio.run(ad._download_media("m-1", "audio"))
         assert path is not None, "audio must be cached, not rejected as non-image"
         assert path.endswith(".m4a")
         import os
@@ -710,8 +710,28 @@ class TestDownloadMediaRouting:
     def test_image_still_validates_and_caches(self):
         png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # valid PNG magic
         ad = self._adapter(png)
-        path = asyncio.run(ad._download_media("m-2", "image"))
+        path, mime = asyncio.run(ad._download_media("m-2", "image"))
         assert path is not None and path.endswith(".jpg")
+
+    def test_file_preserves_real_filename_and_mime(self):
+        # LINE 'file' messages carry the real fileName — the cache must keep the
+        # .pdf extension + application/pdf MIME instead of an anonymous .bin, so
+        # the gateway document pipeline can recognise + auto-extract the PDF.
+        pdf = b"%PDF-1.4\n" + b"%\xe2\xe3\xcf\xd3\n" + b"0" * 128
+        ad = self._adapter(pdf)
+        path, mime = asyncio.run(
+            ad._download_media("m-4", "file", file_name="receipt.pdf")
+        )
+        assert path is not None
+        assert path.endswith(".pdf"), f"expected .pdf, got {path}"
+        assert mime == "application/pdf", f"expected application/pdf, got {mime!r}"
+
+    def test_file_without_name_falls_back_to_bin(self):
+        # No fileName → synthetic name (still cached as a document, not rejected).
+        blob = b"%PDF-1.4\n" + b"0" * 64
+        ad = self._adapter(blob)
+        path, mime = asyncio.run(ad._download_media("m-5", "file"))
+        assert path is not None  # cached (document), not dropped
 
     def test_fetch_failure_returns_none(self):
         from gateway.config import PlatformConfig
