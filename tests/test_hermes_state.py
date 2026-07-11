@@ -191,9 +191,7 @@ class TestSessionLifecycle:
         db.update_token_counts("s1", input_tokens=10, output_tokens=5, model="openai/gpt-5.4")
 
         session = db.get_session("s1")
-        # COALESCE(?, model): the passed model takes priority.
-        # After session-split PR, update_token_counts reflects the live model.
-        assert session["model"] == "openai/gpt-5.4"
+        assert session["model"] == "anthropic/claude-opus-4.6"
 
     def test_update_session_model_overwrites_existing(self, db):
         """A mid-session /model switch must overwrite the stored model.
@@ -213,11 +211,11 @@ class TestSessionLifecycle:
         db.update_session_model("s1", "xiaomi/mimo-v2.5")
         assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
 
-        # And a subsequent token update with a NEW model now reflects that
-        # model (COALESCE(?, model) gives priority to the passed value).
+        # And a subsequent token update does NOT revert it (COALESCE no-ops
+        # because the column is now non-NULL).
         db.update_token_counts("s1", input_tokens=10, output_tokens=5,
                                model="xiaomi/mimo-v2.5-pro")
-        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5-pro"
+        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
 
     def test_update_session_model_clears_browser_lock_and_preserves_lineage(self, db):
         """A later /model switch must replace, not compete with, a Browser lock."""
