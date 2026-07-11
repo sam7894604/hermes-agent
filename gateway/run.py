@@ -16785,16 +16785,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 context_note = _build_document_context_note(display_name, agent_path, mtype)
                 message_text = f"{context_note}\n\n{message_text}"
 
-                # Reliable, gateway-side PDF extraction: inline the content so
-                # the agent gets it WITHOUT depending on the model to run a tool.
-                # Text-layer PDFs extract instantly (pymupdf); scanned PDFs fall
-                # back to render + vision. Best-effort — never breaks the flow.
+                # Reliable, gateway-side document extraction: inline the content
+                # so the agent gets it WITHOUT depending on the model to run a
+                # tool. Dispatches by type (PDF/text/DOCX/XLSX); scanned PDFs
+                # fall back to render + vision. Best-effort — never breaks flow.
                 try:
-                    _pdf_inline = await self._auto_extract_pdf(path, display_name)
-                    if _pdf_inline:
-                        message_text = f"{message_text}\n\n{_pdf_inline}"
-                except Exception as _pdf_exc:
-                    logger.debug("Auto-PDF extraction failed for %s: %s", path, _pdf_exc)
+                    _doc_inline = await self._auto_extract_document(path, mtype, display_name)
+                    if _doc_inline:
+                        message_text = f"{message_text}\n\n{_doc_inline}"
+                except Exception as _doc_exc:
+                    logger.debug("Auto-doc extraction failed for %s: %s", path, _doc_exc)
 
         # Discord: surface the triggering message id per-turn on the user
         # message rather than in the cached system prompt. message_id changes
@@ -22516,6 +22516,91 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return f"{prefix}\n\n{user_text}"
             return prefix
         return user_text
+
+    async def _auto_extract_document(
+        self, real_path: str, mtype: str, display_name: str
+    ) -> Optional[str]:
+        """Gateway-time extraction of an attached document's content so it
+        reaches the agent inline — reliable and automatic, not left to the model
+        to decide whether to run a tool. Dispatches by type to whatever
+        extractor is already available in the venv (no lazy install):
+
+          * PDF          -> pymupdf (text) / render + vision for scanned pages
+          * text family  -> read directly (txt/md/csv/json/xml/yaml/log/code…)
+          * DOCX         -> python-docx
+          * XLSX         -> openpyxl
+
+        Formats with no bundled extractor (PPTX, legacy .doc/.ppt/.xls, archives,
+        video) return None and fall back to the path-pointing context note — see
+        the audit for known gaps. Best-effort; never raises."""
+        _MAX = 20000
+        ext = os.path.splitext(real_path)[1].lower()
+        try:
+            with open(real_path, "rb") as _f:
+                head = _f.read(5)
+        except Exception:
+            return None
+
+        def _wrap(kind: str, body: str) -> Optional[str]:
+            body = (body or "").strip()
+            if not body:
+                return None
+            trunc = " (truncated)" if len(body) > _MAX else ""
+            return f"[Auto-extracted {kind} of '{display_name}'{trunc}:]\n{body[:_MAX]}"
+
+        try:
+            # PDF (magic bytes also catch a legacy ".bin" whose name was lost).
+            if head == b"%PDF-" or ext == ".pdf" or mtype == "application/pdf":
+                return await self._auto_extract_pdf(real_path, display_name)
+
+            _TEXT_EXT = {
+                ".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml",
+                ".toml", ".ini", ".cfg", ".py", ".sh", ".ts", ".tsv",
+            }
+            if mtype.startswith("text/") or ext in _TEXT_EXT:
+                try:
+                    with open(real_path, "r", encoding="utf-8", errors="replace") as _t:
+                        return _wrap("text", _t.read())
+                except Exception as exc:
+                    logger.debug("Auto-doc: text read failed: %s", exc)
+                    return None
+
+            if ext == ".docx":
+                try:
+                    import docx  # python-docx
+                    d = docx.Document(real_path)
+                    parts = [p.text for p in d.paragraphs if p.text]
+                    for tbl in d.tables:
+                        for row in tbl.rows:
+                            parts.append("\t".join(c.text for c in row.cells))
+                    logger.info("Auto-doc: extracted Word doc '%s'", display_name)
+                    return _wrap("Word document text", "\n".join(parts))
+                except Exception as exc:
+                    logger.debug("Auto-doc: docx extract failed: %s", exc)
+                    return None
+
+            if ext == ".xlsx":
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(real_path, read_only=True, data_only=True)
+                    out: List[str] = []
+                    for ws in wb.worksheets:
+                        out.append(f"# Sheet: {ws.title}")
+                        for row in ws.iter_rows(values_only=True):
+                            cells = ["" if c is None else str(c) for c in row]
+                            if any(cells):
+                                out.append("\t".join(cells))
+                        if sum(len(x) for x in out) > _MAX:
+                            break
+                    logger.info("Auto-doc: extracted spreadsheet '%s'", display_name)
+                    return _wrap("spreadsheet", "\n".join(out))
+                except Exception as exc:
+                    logger.debug("Auto-doc: xlsx extract failed: %s", exc)
+                    return None
+        except Exception as exc:
+            logger.debug("Auto-doc extract failed for %s: %s", real_path, exc)
+        # Unsupported here (pptx/legacy office/archive/binary) -> context note.
+        return None
 
     async def _auto_extract_pdf(self, real_path: str, display_name: str) -> Optional[str]:
         """Extract PDF content at gateway time so it reaches the agent inline —
