@@ -125,3 +125,62 @@ def test_vision_read_renders_and_transcribes(tmp_path, monkeypatch):
     r = asyncio.run(GatewayRunner._vision_read_scanned_pdf(_Self(), _Doc(), "scan.pdf", 8))
     assert r is not None
     assert "Aryaduta Bali" in r and "Page 1" in r
+
+
+# ---------------------------------------------------------------------------
+# _auto_extract_document — generic dispatcher (text / csv / docx / xlsx / pdf)
+# ---------------------------------------------------------------------------
+
+def test_doc_text_file_inlined(tmp_path):
+    p = tmp_path / "notes.txt"
+    p.write_text("Aryaduta Bali\nTotal USD 336.35\n", encoding="utf-8")
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "text/plain", "notes.txt"))
+    assert r and "Auto-extracted text" in r and "Aryaduta Bali" in r
+
+
+def test_doc_csv_inlined(tmp_path):
+    p = tmp_path / "data.csv"
+    p.write_text("name,amount\nAryaduta Bali,336.35\n", encoding="utf-8")
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "text/csv", "data.csv"))
+    assert r and "336.35" in r
+
+
+def test_doc_docx_inlined(tmp_path):
+    import docx
+    d = docx.Document()
+    d.add_paragraph("Aryaduta Bali")
+    d.add_paragraph("Total USD 336.35")
+    p = tmp_path / "receipt.docx"
+    d.save(str(p))
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "receipt.docx"))
+    assert r and "Word document text" in r and "Aryaduta Bali" in r and "336.35" in r
+
+
+def test_doc_xlsx_inlined(tmp_path):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["hotel", "amount"])
+    ws.append(["Aryaduta Bali", 336.35])
+    p = tmp_path / "receipt.xlsx"
+    wb.save(str(p))
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "receipt.xlsx"))
+    assert r and "spreadsheet" in r and "Aryaduta Bali" in r and "336.35" in r
+
+
+def test_doc_unsupported_returns_none(tmp_path):
+    # pptx / legacy office / archive -> no bundled extractor -> None (context note fallback)
+    p = tmp_path / "deck.pptx"
+    p.write_bytes(b"PK\x03\x04" + b"0" * 64)  # zip-based, but no pptx extractor
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.presentationml.presentation", "deck.pptx"))
+    assert r is None
+
+
+def test_doc_pdf_delegates(tmp_path, monkeypatch):
+    p = tmp_path / "r.pdf"
+    p.write_bytes(b"%PDF-1.4\n" + b"0" * 32)
+    monkeypatch.setitem(sys.modules, "pymupdf", _fake_pymupdf(["Aryaduta Bali USD 336.35"]))
+    s = _Self()
+    s._auto_extract_pdf = GatewayRunner._auto_extract_pdf.__get__(s, _Self)  # real PDF branch
+    r = asyncio.run(GatewayRunner._auto_extract_document(s, str(p), "application/pdf", "r.pdf"))
+    assert r and "Aryaduta Bali" in r
