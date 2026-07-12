@@ -23331,12 +23331,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     async def _office_via_libreoffice(
         self, real_path: str, display_name: str
     ) -> Optional[str]:
-        """Convert a PowerPoint / legacy binary Office file to PDF with headless
-        LibreOffice, then read it through the PDF text/vision pipeline. Requires
+        """Convert a PowerPoint / legacy binary Office file with headless
+        LibreOffice, then read the result through the native pipeline. Requires
         the deployer-installed ``soffice`` binary — a deliberate one-time install,
-        distinct from the disabled agent-runtime lazy installs. Returns None if
-        soffice is unavailable or the conversion fails (falls to the context
-        note)."""
+        distinct from the disabled agent-runtime lazy installs.
+
+        Spreadsheets (.xls/.ods) convert to XLSX and are read with openpyxl so
+        full cell values survive — a PDF render would clip each cell to its
+        (often narrow) column width. Documents and presentations convert to PDF
+        and go through the text/vision pipeline. Returns None if soffice is
+        unavailable or the conversion fails (falls to the context note)."""
         import shutil
         import tempfile
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
@@ -23346,11 +23350,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "installed; falling back to the context note", display_name,
             )
             return None
+        ext = os.path.splitext(real_path)[1].lower()
+        # Spreadsheets -> XLSX (full cell values); everything else -> PDF.
+        target = "xlsx" if ext in {".xls", ".ods", ".xlsb", ".fods"} else "pdf"
         outdir = tempfile.mkdtemp(prefix="hermes_lo_")
         try:
             proc = await asyncio.create_subprocess_exec(
                 soffice, "--headless", "--nologo", "--nofirststartwizard",
-                "--convert-to", "pdf", "--outdir", outdir, real_path,
+                "--convert-to", target, "--outdir", outdir, real_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 # Isolated HOME so concurrent conversions don't fight over the
@@ -23367,12 +23374,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Auto-doc: LibreOffice convert timed out for %s", real_path)
                 return None
             stem = os.path.splitext(os.path.basename(real_path))[0]
-            pdf_path = os.path.join(outdir, stem + ".pdf")
-            if not os.path.exists(pdf_path):
-                logger.debug("Auto-doc: LibreOffice produced no PDF for %s", real_path)
+            out_path = os.path.join(outdir, stem + "." + target)
+            if not os.path.exists(out_path):
+                logger.debug("Auto-doc: LibreOffice produced no %s for %s", target, real_path)
                 return None
-            logger.info("Auto-doc: converted '%s' via LibreOffice -> PDF", display_name)
-            return await self._auto_extract_pdf(pdf_path, display_name)
+            logger.info("Auto-doc: converted '%s' via LibreOffice -> %s", display_name, target.upper())
+            if target == "xlsx":
+                # Re-enter the dispatcher; the converted .xlsx hits the native
+                # openpyxl branch (full cell values, no column clipping).
+                return await self._auto_extract_document(
+                    out_path,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    display_name,
+                )
+            return await self._auto_extract_pdf(out_path, display_name)
         except Exception as exc:
             logger.debug("Auto-doc: LibreOffice bridge failed for %s: %s", real_path, exc)
             return None
