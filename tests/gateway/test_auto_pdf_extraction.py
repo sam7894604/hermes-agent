@@ -168,11 +168,47 @@ def test_doc_xlsx_inlined(tmp_path):
     assert r and "spreadsheet" in r and "Aryaduta Bali" in r and "336.35" in r
 
 
-def test_doc_unsupported_returns_none(tmp_path):
-    # pptx / legacy office / archive -> no bundled extractor -> None (context note fallback)
+def test_doc_archive_returns_none(tmp_path):
+    # archive / unknown binary -> no bundled extractor -> None (context note fallback)
+    p = tmp_path / "bundle.zip"
+    p.write_bytes(b"PK\x03\x04" + b"0" * 64)
+    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/zip", "bundle.zip"))
+    assert r is None
+
+
+def test_office_dispatch_routes_pptx_to_libreoffice(tmp_path):
+    # New PowerPoint routes to the LibreOffice -> PDF bridge.
     p = tmp_path / "deck.pptx"
-    p.write_bytes(b"PK\x03\x04" + b"0" * 64)  # zip-based, but no pptx extractor
-    r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.presentationml.presentation", "deck.pptx"))
+    p.write_bytes(b"PK\x03\x04" + b"0" * 64)
+    s = _Self()
+    s._office_via_libreoffice = AsyncMock(return_value="[Auto-extracted text of 'deck.pptx':] Slide one")
+    r = asyncio.run(GatewayRunner._auto_extract_document(
+        s, str(p),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "deck.pptx",
+    ))
+    assert r and "Slide one" in r
+    s._office_via_libreoffice.assert_awaited_once()
+
+
+def test_office_dispatch_routes_legacy_doc(tmp_path):
+    # Legacy binary Office (.doc/.ppt/.xls) also routes to LibreOffice.
+    p = tmp_path / "old.doc"
+    p.write_bytes(b"\xd0\xcf\x11\xe0" + b"0" * 64)  # OLE2 compound-file magic
+    s = _Self()
+    s._office_via_libreoffice = AsyncMock(return_value="[Auto-extracted text of 'old.doc':] Legacy body")
+    r = asyncio.run(GatewayRunner._auto_extract_document(s, str(p), "application/msword", "old.doc"))
+    assert r and "Legacy body" in r
+    s._office_via_libreoffice.assert_awaited_once()
+
+
+def test_libreoffice_missing_returns_none(tmp_path, monkeypatch):
+    # soffice not installed -> graceful None (falls to the context note).
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    p = tmp_path / "deck.pptx"
+    p.write_bytes(b"PK\x03\x04" + b"0" * 64)
+    r = asyncio.run(GatewayRunner._office_via_libreoffice(_Self(), str(p), "deck.pptx"))
     assert r is None
 
 
