@@ -22207,10 +22207,72 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception as exc:
                     logger.debug("Auto-doc: xlsx extract failed: %s", exc)
                     return None
+
+            # New PowerPoint + EVERY legacy binary Office format go through a
+            # headless-LibreOffice -> PDF bridge, then the existing PDF text /
+            # vision pipeline reads the result. One dependency (deployer-installed
+            # soffice) covers new + old; docx/xlsx stay on the faster native path.
+            _OFFICE_VIA_LIBREOFFICE = {
+                ".pptx", ".ppt", ".doc", ".xls",
+                ".odt", ".ods", ".odp", ".rtf",
+            }
+            if ext in _OFFICE_VIA_LIBREOFFICE:
+                return await self._office_via_libreoffice(real_path, display_name)
         except Exception as exc:
             logger.debug("Auto-doc extract failed for %s: %s", real_path, exc)
-        # Unsupported here (pptx/legacy office/archive/binary) -> context note.
+        # Unsupported here (archive/binary/unknown) -> context note.
         return None
+
+    async def _office_via_libreoffice(
+        self, real_path: str, display_name: str
+    ) -> Optional[str]:
+        """Convert a PowerPoint / legacy binary Office file to PDF with headless
+        LibreOffice, then read it through the PDF text/vision pipeline. Requires
+        the deployer-installed ``soffice`` binary — a deliberate one-time install,
+        distinct from the disabled agent-runtime lazy installs. Returns None if
+        soffice is unavailable or the conversion fails (falls to the context
+        note)."""
+        import shutil
+        import tempfile
+        soffice = shutil.which("soffice") or shutil.which("libreoffice")
+        if not soffice:
+            logger.info(
+                "Auto-doc: '%s' needs LibreOffice to extract but soffice is not "
+                "installed; falling back to the context note", display_name,
+            )
+            return None
+        outdir = tempfile.mkdtemp(prefix="hermes_lo_")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                soffice, "--headless", "--nologo", "--nofirststartwizard",
+                "--convert-to", "pdf", "--outdir", outdir, real_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                # Isolated HOME so concurrent conversions don't fight over the
+                # single-user LibreOffice profile lock.
+                env={**os.environ, "HOME": outdir},
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=90)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                logger.debug("Auto-doc: LibreOffice convert timed out for %s", real_path)
+                return None
+            stem = os.path.splitext(os.path.basename(real_path))[0]
+            pdf_path = os.path.join(outdir, stem + ".pdf")
+            if not os.path.exists(pdf_path):
+                logger.debug("Auto-doc: LibreOffice produced no PDF for %s", real_path)
+                return None
+            logger.info("Auto-doc: converted '%s' via LibreOffice -> PDF", display_name)
+            return await self._auto_extract_pdf(pdf_path, display_name)
+        except Exception as exc:
+            logger.debug("Auto-doc: LibreOffice bridge failed for %s: %s", real_path, exc)
+            return None
+        finally:
+            shutil.rmtree(outdir, ignore_errors=True)
 
     async def _auto_extract_pdf(self, real_path: str, display_name: str) -> Optional[str]:
         """Extract PDF content at gateway time so it reaches the agent inline —
