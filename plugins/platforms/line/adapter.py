@@ -77,7 +77,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote as _urlquote
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
@@ -562,6 +563,19 @@ class _LineClient:
             "Authorization": f"Bearer {channel_access_token}",
             "Content-Type": "application/json",
         }
+        # Ids of messages this bot has sent (from the reply/push response
+        # ``sentMessages``). Used to treat a quote-reply of the bot's OWN
+        # message as an implicit @mention. Bounded so it can't grow unbounded.
+        self.sent_message_ids: Deque[str] = deque(maxlen=500)
+
+    def _record_sent(self, payload: Any) -> None:
+        try:
+            for m in (payload or {}).get("sentMessages", []) or []:
+                mid = m.get("id")
+                if mid:
+                    self.sent_message_ids.append(str(mid))
+        except Exception:
+            pass
 
     async def reply(self, reply_token: str, messages: List[Dict[str, Any]]) -> None:
         import aiohttp
@@ -575,6 +589,10 @@ class _LineClient:
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(f"LINE reply {resp.status}: {body[:200]}")
+                try:
+                    self._record_sent(await resp.json())
+                except Exception:
+                    pass
 
     async def push(self, chat_id: str, messages: List[Dict[str, Any]]) -> None:
         import aiohttp
@@ -588,6 +606,10 @@ class _LineClient:
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(f"LINE push {resp.status}: {body[:200]}")
+                try:
+                    self._record_sent(await resp.json())
+                except Exception:
+                    pass
 
     async def loading(self, chat_id: str, seconds: int = 60) -> None:
         """Loading indicator (DM only). LINE rejects this for groups/rooms."""
@@ -861,6 +883,19 @@ class LineAdapter(BasePlatformAdapter):
         self._observe_unmentioned = _truthy_env(
             "LINE_OBSERVE_UNMENTIONED",
             bool(extra.get("observe_unmentioned", True)),
+        )
+        # Cost/abuse guard for observed-media pre-extraction: per-chat sliding
+        # window of extraction timestamps. Beyond the cap we fall back to a
+        # lightweight placeholder (no download/vision) so a media flood in an
+        # authorized group can't run unbounded extraction. §6/§7.
+        self._observe_media_calls: Dict[str, Deque[float]] = {}
+        self._observe_media_max = int(
+            os.getenv("LINE_OBSERVE_MEDIA_MAX")
+            or extra.get("observe_media_max", 12)
+        )
+        self._observe_media_window = float(
+            os.getenv("LINE_OBSERVE_MEDIA_WINDOW")
+            or extra.get("observe_media_window", 3600)
         )
         # Name-resolution TTL cache: id -> (display_name, expiry_ts).
         self._name_cache: Dict[str, Tuple[str, float]] = {}
@@ -1161,6 +1196,17 @@ class LineAdapter(BasePlatformAdapter):
             )
 
         mentioned = _bot_mentioned(msg, self._bot_user_id)
+
+        # Quote-reply of the bot's OWN message = implicit @mention: replying to
+        # something Toothless said is clearly addressing it, so the user should
+        # not have to type "@Toothless" again. LINE puts the quoted message's id
+        # in ``quotedMessageId``; we only treat it as a mention when that id is
+        # one WE sent (tracked in _LineClient.sent_message_ids) — quoting another
+        # member's message does NOT count (stays observe-only).
+        if not mentioned:
+            qmid = (msg or {}).get("quotedMessageId")
+            if qmid and self._client and str(qmid) in self._client.sent_message_ids:
+                mentioned = True
 
         # ---- Authorization / routing policy (whitelist subsystem) ----------
         if chat_type == "dm":
@@ -1489,12 +1535,15 @@ class LineAdapter(BasePlatformAdapter):
     ) -> None:
         """Record a message as passive observed context (no agent turn).
 
-        Media policy (§7): drop video/audio entirely; record text; images and
-        files are recorded as a lightweight ``[type]`` placeholder (binary
-        retention/cleanup is a documented follow-up). The observed rows land in
-        a single shared, chat-scoped session (per-user identity dropped) so a
-        later @mention turn can load the whole group's context — mirroring the
-        Telegram observed-group-context mechanism.
+        Media policy (§7): drop video/audio entirely; record text. Images and
+        files (PDF) are DOWNLOADED and PRE-EXTRACTED at observe time — an image
+        gets a vision description, a PDF its text — and that content is inlined
+        into the observed row, so a later @mention turn can reference "the file I
+        just sent" even though LINE doesn't allow @-ing an image/file upload.
+        Extraction is best-effort, rate-limited per chat, and still does NOT
+        trigger the agent (mention gate unchanged). The observed rows land in a
+        single shared, chat-scoped session (per-user identity dropped) so a
+        later @mention turn can load the whole group's context.
         """
         if not self._observe_unmentioned:
             return
@@ -1505,10 +1554,12 @@ class LineAdapter(BasePlatformAdapter):
             return  # dropped by policy — not recorded, not fetched
         if msg_type == "text":
             body = msg.get("text", "") or ""
+        elif msg_type == "image":
+            body = await self._observe_extract_media(chat_id, message_id, "image", "")
         elif msg_type == "file":
             fname = msg.get("fileName", "")
-            body = f"[file: {fname}]" if fname else "[file]"
-        elif msg_type in {"image", "sticker", "location"}:
+            body = await self._observe_extract_media(chat_id, message_id, "file", fname)
+        elif msg_type in {"sticker", "location"}:
             body = f"[{msg_type}]"
         else:
             body = f"[{msg_type}]"
@@ -1534,6 +1585,83 @@ class LineAdapter(BasePlatformAdapter):
             )
         except Exception:
             logger.debug("LINE: observe-record failed", exc_info=True)
+
+    def _observe_media_allowed(self, chat_id: str) -> bool:
+        """Sliding-window rate limit for observed-media pre-extraction so a
+        media flood in an authorized group can't run unbounded vision/PDF
+        extraction. Records the call when allowed."""
+        now = time.time()
+        window = self._observe_media_window
+        calls = self._observe_media_calls.setdefault(chat_id, deque())
+        while calls and (now - calls[0]) > window:
+            calls.popleft()
+        if len(calls) >= self._observe_media_max:
+            return False
+        calls.append(now)
+        return True
+
+    async def _observe_extract_media(
+        self, chat_id: str, message_id: str, kind: str, fname: str
+    ) -> str:
+        """Download an observed (unmentioned) image/file and pre-extract its
+        content so a later @mention turn can use it. Returns an inlineable
+        string; on any failure / over budget, falls back to the lightweight
+        ``[image]`` / ``[file: name]`` placeholder (never raises)."""
+        placeholder = (f"[file: {fname}]" if fname else "[file]") if kind == "file" else "[image]"
+        # §7 retention/filter + cost guard: only pre-extract within budget.
+        if not self._observe_media_allowed(chat_id):
+            return placeholder
+        try:
+            downloaded = await self._download_media(
+                message_id, kind, file_name=fname
+            )
+        except Exception:
+            return placeholder
+        if not downloaded:
+            return placeholder
+        path, mime = downloaded
+        _MAX = 8000
+        try:
+            if kind == "image" or (mime or "").startswith("image/"):
+                from tools.vision_tools import vision_analyze_tool
+                prompt = (
+                    "Describe this image for later reference. If it is a receipt, "
+                    "invoice, bill or document, transcribe the key fields verbatim "
+                    "(merchant/name, dates, line items, and especially the total "
+                    "amount and currency)."
+                )
+                res = await vision_analyze_tool(path, prompt)
+                data = json.loads(res) if isinstance(res, str) else (res or {})
+                desc = (data.get("analysis") or "").strip() if isinstance(data, dict) else ""
+                if desc:
+                    logger.info("LINE: observed image pre-analysed via vision (chat %s)", chat_id)
+                    return f"[image] {desc[:_MAX]}"
+                return placeholder
+            # file: best-effort PDF text-layer extraction (pymupdf). Scanned /
+            # Office go through the full pipeline only on the trigger path.
+            is_pdf = (mime == "application/pdf") or path.lower().endswith(".pdf")
+            if not is_pdf:
+                try:
+                    with open(path, "rb") as _f:
+                        is_pdf = _f.read(5) == b"%PDF-"
+                except Exception:
+                    is_pdf = False
+            if is_pdf:
+                try:
+                    import pymupdf
+                    doc = pymupdf.open(path)
+                    text = "\n".join(pg.get_text() for pg in doc).strip()
+                    doc.close()
+                except Exception:
+                    text = ""
+                label = f"[file: {fname}]" if fname else "[file: PDF]"
+                if text:
+                    logger.info("LINE: observed PDF pre-extracted text (chat %s)", chat_id)
+                    return f"{label}\n{text[:_MAX]}"
+                return label
+        except Exception:
+            logger.debug("LINE: observe media extract failed", exc_info=True)
+        return placeholder
 
     async def _quote_context(
         self, source: Dict[str, Any], chat_id: str, chat_type: str,
