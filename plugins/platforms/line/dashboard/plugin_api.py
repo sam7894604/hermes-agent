@@ -521,6 +521,9 @@ _SETTINGS_SCHEMA = [
      "source": "config", "hot_reload": True, "default": False, "type": "bool"},
     {"key": "retention_days", "label": "媒體保留天數 / Media retention (days)",
      "source": "config", "hot_reload": True, "default": 3, "type": "int"},
+    {"key": "media_backfill_window_minutes",
+     "label": "媒體回溯時間窗(分) / Media backfill window (min)",
+     "source": "config", "hot_reload": True, "default": 1, "type": "int"},
     {"key": "unauthorized_notify", "label": "未授權通知對象 / Unauthorized notify target",
      "source": "config", "hot_reload": True, "default": None, "type": "text"},
     {"key": "media", "label": "媒體類型保留/丟棄 / Media keep/drop types",
@@ -612,6 +615,14 @@ def _coerce_setting(key: str, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="retention_days must be an integer")
+    if key == "media_backfill_window_minutes":
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="media_backfill_window_minutes must be an integer")
+        if n < 0:
+            raise HTTPException(status_code=400, detail="media_backfill_window_minutes must be >= 0")
+        return n
     return value
 
 

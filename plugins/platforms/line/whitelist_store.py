@@ -241,17 +241,25 @@ class WhitelistStore:
     _EDITABLE_SETTINGS = (
         "requires_mention", "unauthorized_notify", "retention_days",
         "observe_unmentioned", "allow_all_users", "media",
+        "media_backfill_window_minutes",
     )
 
     def get_settings(self) -> Dict[str, Any]:
         """Current values of the config-backed, Dashboard-editable settings."""
         line = self._line_config()
+        try:
+            backfill_min = float(line.get("media_backfill_window_minutes", 1))
+        except (TypeError, ValueError):
+            backfill_min = 1.0
         return {
             "requires_mention": bool(line.get("requires_mention", _DEFAULT_REQUIRES_MENTION)),
             "unauthorized_notify": line.get("unauthorized_notify"),
             "retention_days": int(line.get("retention_days", _DEFAULT_RETENTION_DAYS) or _DEFAULT_RETENTION_DAYS),
             "observe_unmentioned": bool(line.get("observe_unmentioned", True)),
             "allow_all_users": bool(line.get("allow_all_users", False)),
+            # Backfill window (minutes) for pulling recently-observed group media
+            # into a later @mention turn. 0 disables. Dashboard-editable.
+            "media_backfill_window_minutes": backfill_min,
             "media": self._as_dict(line.get("media")) or {
                 "keep_types": ["image", "file"], "drop_types": ["video", "audio"]
             },

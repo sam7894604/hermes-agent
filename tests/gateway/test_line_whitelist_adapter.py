@@ -324,78 +324,89 @@ class TestObserveAndQuote:
 
 
 # ---------------------------------------------------------------------------
-# Observed-media pre-extraction (image -> vision, PDF -> text) with budget
+# Observed media = lightweight placeholder; on-demand time-window backfill
 # ---------------------------------------------------------------------------
 
+def _store_with_observed(rows):
+    store = MagicMock()
+    store.get_or_create_session.return_value = MagicMock(session_id="s1")
+    db = MagicMock()
+    db.get_messages.return_value = rows
+    store._db = db
+    return store
+
+
 @pytest.mark.asyncio
-class TestObserveMediaExtract:
+class TestObservedMediaBackfill:
 
-    async def test_image_observed_is_vision_extracted(self, monkeypatch):
+    async def test_observe_image_is_lightweight_placeholder(self):
+        # observe records only a placeholder + platform_message_id — NO download.
         ad = _make_adapter()
-        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        import tools.vision_tools as vt
-        monkeypatch.setattr(
-            vt, "vision_analyze_tool",
-            AsyncMock(return_value='{"success": true, "analysis": "Receipt: Mongolian Wok Total 150000 IDR"}'),
+        ad._session_store = _store_with_observed([])
+        ad._download_media = AsyncMock()
+        await ad._observe_record(
+            source={"type": "group", "groupId": "Cok", "userId": "Uy"},
+            chat_id="Cok", chat_type="group", user_id="Uy",
+            msg={"type": "image"}, msg_type="image", message_id="img1",
         )
-        body = await ad._observe_extract_media("Cok", "m1", "image", "")
-        assert body.startswith("[image] ") and "150000" in body
-        ad._download_media.assert_awaited_once()
-
-    async def test_pdf_observed_is_text_extracted(self, monkeypatch, tmp_path):
-        p = tmp_path / "r.pdf"
-        p.write_bytes(b"%PDF-1.4\n" + b"0" * 32)
-        ad = _make_adapter()
-        ad._download_media = AsyncMock(return_value=(str(p), "application/pdf"))
-        import sys, types
-        m = types.ModuleType("pymupdf")
-
-        class _Doc:
-            page_count = 1
-            def __iter__(self):
-                class _P:
-                    def get_text(self_inner):
-                        return "Aryaduta Bali USD 336.35"
-                return iter([_P()])
-            def close(self):
-                pass
-        m.open = lambda path: _Doc()
-        monkeypatch.setitem(sys.modules, "pymupdf", m)
-        body = await ad._observe_extract_media("Cok", "m2", "file", "receipt.pdf")
-        assert body.startswith("[file: receipt.pdf]") and "336.35" in body
-
-    async def test_over_budget_falls_back_to_placeholder(self):
-        ad = _make_adapter()
-        ad._observe_media_max = 1
-        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        assert ad._observe_media_allowed("Cok") is True   # consume the only slot
-        body = await ad._observe_extract_media("Cok", "m2", "image", "")
-        assert body == "[image]"
-        ad._download_media.assert_not_called()             # no download when over budget
-
-    async def test_download_failure_placeholder(self):
-        ad = _make_adapter()
-        ad._download_media = AsyncMock(return_value=None)
-        body = await ad._observe_extract_media("Cok", "m1", "file", "receipt.pdf")
-        assert body == "[file: receipt.pdf]"
-
-    async def test_authorized_group_image_no_mention_extracts_and_observes(self, monkeypatch):
-        # End-to-end through _handle_message_event: unmentioned image in an
-        # authorized group is observe-recorded (not triggered) with the vision
-        # content inlined so a later @mention can use it.
-        ad = _make_adapter()
-        ad._session_store = MagicMock()
-        ad._session_store.get_or_create_session.return_value = MagicMock(session_id="s1")
-        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        import tools.vision_tools as vt
-        monkeypatch.setattr(
-            vt, "vision_analyze_tool",
-            AsyncMock(return_value='{"success": true, "analysis": "Total 150000 IDR"}'),
-        )
-        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
-        await ad._handle_message_event(
-            _msg_event(src, {"type": "image", "id": "img1"}), authorized=True,
-        )
-        ad.handle_message.assert_not_called()               # observe only, no trigger
+        ad._download_media.assert_not_called()              # cheap: no fetch at observe
         appended = ad._session_store.append_to_transcript.call_args.args[1]
-        assert appended["observed"] is True and "150000" in appended["content"]
+        assert "[image]" in appended["content"]
+        assert appended["platform_message_id"] == "img1" and appended["observed"] is True
+
+    async def test_backfill_pulls_recent_observed_image(self):
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
+        ad._session_store = _store_with_observed([
+            {"role": "user", "content": "[Uy|Uy]\n[image]", "observed": True,
+             "platform_message_id": "img99", "timestamp": time.time() - 10},
+        ])
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        urls, types = await ad._backfill_recent_media("Cok", "group")
+        assert urls == ["/tmp/x.jpg"] and types == ["image/jpeg"]
+        ad._download_media.assert_awaited_once_with("img99", "image")
+
+    async def test_backfill_respects_window(self):
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}  # 60s
+        ad._session_store = _store_with_observed([
+            {"role": "user", "content": "[Uy|Uy]\n[image]", "observed": True,
+             "platform_message_id": "old", "timestamp": time.time() - 300},  # 5 min ago
+        ])
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        urls, types = await ad._backfill_recent_media("Cok", "group")
+        assert urls == [] and types == []
+        ad._download_media.assert_not_called()
+
+    async def test_backfill_window_zero_disables(self):
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 0}
+        ad._session_store = _store_with_observed([
+            {"role": "user", "content": "[Uy|Uy]\n[image]", "observed": True,
+             "platform_message_id": "img99", "timestamp": time.time()},
+        ])
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        urls, _ = await ad._backfill_recent_media("Cok", "group")
+        assert urls == []
+
+    async def test_trigger_no_media_backfills_recent_image(self):
+        # End-to-end: an @mention text message with no media of its own pulls the
+        # recently-observed image into the triggering event's media_urls.
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
+        ad._session_store = _store_with_observed([
+            {"role": "user", "content": "[Uy|Uy]\n[image]", "observed": True,
+             "platform_message_id": "img99", "timestamp": time.time() - 5},
+        ])
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
+        msg = {"type": "text", "id": "m1", "text": "這張多少錢",
+               "mention": {"mentionees": [{"isSelf": True}]}}
+        await ad._handle_message_event(_msg_event(src, msg), authorized=True)
+        ad.handle_message.assert_awaited_once()
+        event_obj = ad.handle_message.await_args.args[0]
+        assert "/tmp/x.jpg" in event_obj.media_urls   # backfilled, gateway will vision it
