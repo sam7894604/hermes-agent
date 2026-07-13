@@ -77,7 +77,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections import deque
+from collections import deque, OrderedDict
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote as _urlquote
 
@@ -870,6 +870,17 @@ class LineAdapter(BasePlatformAdapter):
             os.getenv("LINE_MEDIA_BACKFILL_WINDOW_MIN")
             or extra.get("media_backfill_window_minutes", 1)
         )
+        # Backfill cost control — "抽過的快取不重抽": the same recently-uploaded
+        # media can be pulled into several trigger turns inside the window, so we
+        # memoize both the LINE download and the vision extraction by the
+        # (immutable) LINE message id. Bounded FIFO so a busy group can't grow
+        # them without limit.
+        self._bf_download_cache: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
+        self._bf_vision_cache: "OrderedDict[str, str]" = OrderedDict()
+        self._bf_cache_max = int(
+            os.getenv("LINE_MEDIA_BACKFILL_CACHE_MAX")
+            or extra.get("media_backfill_cache_max", 256)
+        )
         # Name-resolution TTL cache: id -> (display_name, expiry_ts).
         self._name_cache: Dict[str, Tuple[str, float]] = {}
         self._name_cache_ttl = float(
@@ -1263,13 +1274,18 @@ class LineAdapter(BasePlatformAdapter):
 
         # On-demand media backfill (§6/§7): a triggering GROUP message that
         # carries no media of its own — e.g. "@Toothless what's the amount on
-        # that receipt?" after silently uploading it — pulls in the recently
-        # OBSERVED image/file uploads within the backfill window so the current
-        # turn can actually see them (gateway runs vision / doc-extract on the
-        # appended paths). Complements quote-reply (explicit) for the "剛剛那張"
-        # case where the user didn't quote. No media of its own → only then.
+        # that receipt?" after silently uploading it — deterministically pulls in
+        # the recently OBSERVED image/file uploads within the backfill window.
+        # Images are vision-read (cached) and injected as channel_context text;
+        # files are attached as media so the agent can extract them. Complements
+        # quote-reply (explicit) for the "剛剛那張" case where the user didn't
+        # quote. The program decides — the model never has to search. No media of
+        # its own → only then.
+        backfill_context: Optional[str] = None
         if not media_urls and chat_type in {"group", "room"}:
-            bf_urls, bf_types = await self._backfill_recent_media(chat_id, chat_type)
+            backfill_context, bf_urls, bf_types = await self._backfill_recent_media(
+                chat_id, chat_type
+            )
             if bf_urls:
                 media_urls.extend(bf_urls)
                 media_types.extend(bf_types)
@@ -1305,6 +1321,9 @@ class LineAdapter(BasePlatformAdapter):
             message_id=message_id,
             media_urls=media_urls,
             media_types=media_types,
+            # Deterministic media-backfill content (vision text for recent group
+            # images + recent-uploads hint); gateway prepends it to this turn.
+            channel_context=backfill_context,
         )
 
         await self.handle_message(event_obj)
@@ -1584,31 +1603,104 @@ class LineAdapter(BasePlatformAdapter):
                 pass
         return max(0.0, minutes) * 60.0
 
+    def _bf_cache_get(self, cache: "OrderedDict", key: str):
+        """FIFO-cache lookup that refreshes recency on hit."""
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+    def _bf_cache_put(self, cache: "OrderedDict", key: str, value) -> None:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._bf_cache_max:
+            cache.popitem(last=False)
+
+    async def _bf_download(
+        self, message_id: str, kind: str, file_name: str = "",
+    ) -> Optional[Tuple[str, str]]:
+        """Download-once memoization for backfill: reuse the cached file for a
+        LINE message id as long as it still exists on disk, else re-fetch."""
+        hit = self._bf_cache_get(self._bf_download_cache, message_id)
+        if hit is not None:
+            path, mime = hit
+            if path and os.path.exists(path):
+                return hit
+        try:
+            downloaded = await self._download_media(
+                message_id, kind, file_name=file_name
+            )
+        except Exception:
+            downloaded = None
+        if downloaded:
+            self._bf_cache_put(self._bf_download_cache, message_id, downloaded)
+        return downloaded
+
+    async def _bf_vision(self, message_id: str, path: str) -> Optional[str]:
+        """Extract-once memoization: vision-read an image and cache the analysis
+        text by the (immutable) LINE message id so re-pulling the same image
+        into a later trigger turn never re-runs vision. §7 cost control."""
+        cached = self._bf_cache_get(self._bf_vision_cache, message_id)
+        if cached is not None:
+            return cached
+        try:
+            from tools.vision_tools import vision_analyze_tool
+            raw = await vision_analyze_tool(
+                image_url=path,
+                user_prompt=(
+                    "請描述這張圖片的內容。若是收據、帳單、發票或菜單，"
+                    "逐項列出商家名稱、各品項與金額、稅/服務費與總金額（含幣別）。"
+                ),
+            )
+            text = ""
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if data.get("success"):
+                    text = str(data.get("analysis") or "").strip()
+            except (ValueError, TypeError, AttributeError):
+                text = str(raw or "").strip()
+            if text:
+                self._bf_cache_put(self._bf_vision_cache, message_id, text)
+            return text or None
+        except Exception:
+            logger.debug("LINE: backfill vision failed", exc_info=True)
+            return None
+
     async def _backfill_recent_media(
         self, chat_id: str, chat_type: str,
-    ) -> Tuple[List[str], List[str]]:
-        """On-demand: when the bot is triggered but the triggering message has
-        no media, look back at recently-OBSERVED (unmentioned) image/file
-        uploads in this group within the backfill window and pull them into the
-        current turn. Returns ``(media_urls, media_types)`` for the gateway's
-        normal media pipeline (vision for images, doc-extract for PDFs) to
-        handle — so "@Toothless what's the amount on that receipt?" works even
-        though the image was never @-ed. Best-effort; never raises."""
+    ) -> Tuple[Optional[str], List[str], List[str]]:
+        """On-demand, deterministic media backfill (§6/§7). When the bot is
+        triggered but the triggering message carries no media of its own, look
+        back at recently-OBSERVED (unmentioned) image/file uploads in this group
+        within the backfill window and make their content available to THIS turn
+        — the program decides, the (weak) model never has to search.
+
+        * **Images** are vision-read here (extract-once, cached by message id)
+          and their analysis is injected as ``channel_context`` text — so we do
+          NOT re-attach the raw image every turn (the gateway's vision pass has
+          no cache and would re-bill it). This doubles as the auxiliary prompt
+          hint listing recent uploads.
+        * **Files/PDFs** are downloaded (download-once cache) and returned as
+          ``media_urls`` so the agent can extract them with its file tools.
+
+        Returns ``(channel_context, media_urls, media_types)``. Best-effort;
+        never raises."""
         window = self._backfill_window_seconds()
         if window <= 0:
-            return [], []
+            return None, [], []
         store = getattr(self, "_session_store", None)
         if store is None or chat_type not in {"group", "room"}:
-            return [], []
+            return None, [], []
         _MAX_BACKFILL = 3
         try:
             shared = self.build_source(chat_id=chat_id, chat_type=chat_type)
             entry = store.get_or_create_session(shared)
             db = getattr(store, "_db", None)
             if db is None or not hasattr(db, "get_messages"):
-                return [], []
+                return None, [], []
             now = time.time()
-            candidates: List[Tuple[str, str]] = []  # (message_id, kind)
+            # (message_id, kind, hhmm, file_name)
+            candidates: List[Tuple[str, str, str, str]] = []
             for row in db.get_messages(entry.session_id):
                 if not row.get("observed"):
                     continue
@@ -1616,6 +1708,7 @@ class LineAdapter(BasePlatformAdapter):
                 try:
                     if ts is not None and (now - float(ts)) > window:
                         continue
+                    hhmm = time.strftime("%H:%M", time.localtime(float(ts))) if ts else "?"
                 except (TypeError, ValueError):
                     continue
                 mid = str(row.get("platform_message_id") or "")
@@ -1623,30 +1716,51 @@ class LineAdapter(BasePlatformAdapter):
                     continue
                 content = str(row.get("content") or "")
                 if "[image]" in content:
-                    candidates.append((mid, "image"))
+                    candidates.append((mid, "image", hhmm, ""))
                 elif "[file" in content:
-                    candidates.append((mid, "file"))
+                    # content tail is "[file: name.pdf]" — recover the name.
+                    fname = ""
+                    marker = "[file: "
+                    if marker in content:
+                        fname = content.split(marker, 1)[1].split("]", 1)[0].strip()
+                    candidates.append((mid, "file", hhmm, fname))
             # Most recent first, capped.
+            hint_lines: List[str] = []
             urls: List[str] = []
             types: List[str] = []
-            for mid, kind in list(reversed(candidates))[:_MAX_BACKFILL]:
-                try:
-                    downloaded = await self._download_media(mid, kind)
-                except Exception:
-                    downloaded = None
-                if downloaded:
-                    path, mime = downloaded
+            for mid, kind, hhmm, fname in list(reversed(candidates))[:_MAX_BACKFILL]:
+                downloaded = await self._bf_download(mid, kind, file_name=fname)
+                if not downloaded:
+                    continue
+                path, mime = downloaded
+                if kind == "image":
+                    analysis = await self._bf_vision(mid, path)
+                    if analysis:
+                        hint_lines.append(f"- 圖片（{hhmm} 上傳）內容：{analysis}")
+                    else:
+                        hint_lines.append(f"- 圖片（{hhmm} 上傳）：無法辨識內容")
+                else:
                     urls.append(path)
                     types.append(mime or kind)
-            if urls:
-                logger.info(
-                    "LINE: backfilled %d recent observed media into trigger turn (chat %s, window %.0fs)",
-                    len(urls), chat_id, window,
+                    label = fname or "檔案"
+                    hint_lines.append(
+                        f"- 檔案 {label}（{hhmm} 上傳）：已附上本回合，可用檔案工具讀取"
+                    )
+            channel_context = None
+            if hint_lines:
+                channel_context = (
+                    "[近期本群組上傳的媒體 / Recently uploaded media in this group]\n"
+                    + "\n".join(hint_lines)
                 )
-            return urls, types
+                logger.info(
+                    "LINE: backfilled %d recent observed media into trigger turn "
+                    "(chat %s, window %.0fs, %d file attach)",
+                    len(hint_lines), chat_id, window, len(urls),
+                )
+            return channel_context, urls, types
         except Exception:
             logger.debug("LINE: media backfill failed", exc_info=True)
-            return [], []
+            return None, [], []
 
     async def _quote_context(
         self, source: Dict[str, Any], chat_id: str, chat_type: str,
