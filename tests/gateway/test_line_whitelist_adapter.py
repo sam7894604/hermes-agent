@@ -354,7 +354,10 @@ class TestObservedMediaBackfill:
         assert "[image]" in appended["content"]
         assert appended["platform_message_id"] == "img1" and appended["observed"] is True
 
-    async def test_backfill_pulls_recent_observed_image(self):
+    async def test_backfill_image_vision_injected_as_context(self, monkeypatch):
+        # An in-window observed image is vision-read and its analysis is injected
+        # as channel_context text (NOT re-attached as media, to avoid re-billing
+        # the gateway's cache-less vision every turn).
         import time
         ad = _make_adapter()
         ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
@@ -363,9 +366,48 @@ class TestObservedMediaBackfill:
              "platform_message_id": "img99", "timestamp": time.time() - 10},
         ])
         ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        urls, types = await ad._backfill_recent_media("Cok", "group")
-        assert urls == ["/tmp/x.jpg"] and types == ["image/jpeg"]
-        ad._download_media.assert_awaited_once_with("img99", "image")
+        import tools.vision_tools as vt
+        monkeypatch.setattr(
+            vt, "vision_analyze_tool",
+            AsyncMock(return_value='{"success": true, "analysis": "晚餐 Total 150000 IDR"}'),
+        )
+        ctx, urls, types = await ad._backfill_recent_media("Cok", "group")
+        assert urls == [] and types == []            # image goes to context, not media
+        assert "150000" in ctx and "近期本群組上傳" in ctx
+        ad._download_media.assert_awaited_once_with("img99", "image", file_name="")
+
+    async def test_backfill_vision_is_cached_not_reextracted(self, monkeypatch):
+        # Re-pulling the same image id in a later turn must NOT re-run vision.
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
+        rows = [{"role": "user", "content": "[Uy|Uy]\n[image]", "observed": True,
+                 "platform_message_id": "img99", "timestamp": time.time() - 5}]
+        ad._session_store = _store_with_observed(rows)
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        import tools.vision_tools as vt
+        vision = AsyncMock(return_value='{"success": true, "analysis": "Total 150000"}')
+        monkeypatch.setattr(vt, "vision_analyze_tool", vision)
+        # monkeypatch os.path.exists so the download cache hits on the 2nd call
+        monkeypatch.setattr("plugins.platforms.line.adapter.os.path.exists", lambda p: True)
+        await ad._backfill_recent_media("Cok", "group")
+        await ad._backfill_recent_media("Cok", "group")
+        vision.assert_awaited_once()                  # extract-once
+        ad._download_media.assert_awaited_once()       # download-once
+
+    async def test_backfill_file_attached_as_media(self):
+        import time
+        ad = _make_adapter()
+        ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
+        ad._session_store = _store_with_observed([
+            {"role": "user", "content": "[Uy|Uy]\n[file: receipt.pdf]", "observed": True,
+             "platform_message_id": "f7", "timestamp": time.time() - 8},
+        ])
+        ad._download_media = AsyncMock(return_value=("/tmp/receipt.pdf", "application/pdf"))
+        ctx, urls, types = await ad._backfill_recent_media("Cok", "group")
+        assert urls == ["/tmp/receipt.pdf"] and types == ["application/pdf"]
+        assert "receipt.pdf" in ctx                    # named in the hint too
+        ad._download_media.assert_awaited_once_with("f7", "file", file_name="receipt.pdf")
 
     async def test_backfill_respects_window(self):
         import time
@@ -376,8 +418,8 @@ class TestObservedMediaBackfill:
              "platform_message_id": "old", "timestamp": time.time() - 300},  # 5 min ago
         ])
         ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        urls, types = await ad._backfill_recent_media("Cok", "group")
-        assert urls == [] and types == []
+        ctx, urls, types = await ad._backfill_recent_media("Cok", "group")
+        assert ctx is None and urls == [] and types == []
         ad._download_media.assert_not_called()
 
     async def test_backfill_window_zero_disables(self):
@@ -389,12 +431,12 @@ class TestObservedMediaBackfill:
              "platform_message_id": "img99", "timestamp": time.time()},
         ])
         ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
-        urls, _ = await ad._backfill_recent_media("Cok", "group")
-        assert urls == []
+        ctx, urls, _ = await ad._backfill_recent_media("Cok", "group")
+        assert ctx is None and urls == []
 
-    async def test_trigger_no_media_backfills_recent_image(self):
-        # End-to-end: an @mention text message with no media of its own pulls the
-        # recently-observed image into the triggering event's media_urls.
+    async def test_trigger_no_media_injects_backfill_context(self, monkeypatch):
+        # End-to-end: an @mention text message with no media of its own gets the
+        # recently-observed image's vision text injected via channel_context.
         import time
         ad = _make_adapter()
         ad._whitelist.get_settings.return_value = {"media_backfill_window_minutes": 1}
@@ -403,10 +445,16 @@ class TestObservedMediaBackfill:
              "platform_message_id": "img99", "timestamp": time.time() - 5},
         ])
         ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        import tools.vision_tools as vt
+        monkeypatch.setattr(
+            vt, "vision_analyze_tool",
+            AsyncMock(return_value='{"success": true, "analysis": "Total 150000 IDR"}'),
+        )
         src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
         msg = {"type": "text", "id": "m1", "text": "這張多少錢",
                "mention": {"mentionees": [{"isSelf": True}]}}
         await ad._handle_message_event(_msg_event(src, msg), authorized=True)
         ad.handle_message.assert_awaited_once()
         event_obj = ad.handle_message.await_args.args[0]
-        assert "/tmp/x.jpg" in event_obj.media_urls   # backfilled, gateway will vision it
+        assert event_obj.channel_context and "150000" in event_obj.channel_context
+        assert event_obj.media_urls == []             # image content rode context, not media
