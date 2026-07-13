@@ -474,7 +474,13 @@ def finalize_turn(
     if final_response and not interrupted:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-            if _failed and agent._file_mutation_verifier_enabled():
+            # Suppress the footer when a turbovault (vault) write succeeded this
+            # turn: the content mutation actually landed via MCP, so a failed
+            # local file-patch fallback is a false alarm, not a lost edit. The
+            # safety net stays intact when NOTHING succeeded (flag stays False),
+            # so genuine "nothing was written" turns are still surfaced.
+            _vault_ok = getattr(agent, "_turn_vault_mutation_succeeded", False)
+            if _failed and not _vault_ok and agent._file_mutation_verifier_enabled():
                 footer = agent._format_file_mutation_failure_footer(_failed)
                 if footer:
                     final_response = final_response.rstrip() + "\n\n" + footer

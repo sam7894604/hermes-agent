@@ -329,3 +329,86 @@ def test_file_mutating_tools_set_shape():
     track it.  This test fails loudly on unilateral additions.
     """
     assert _FILE_MUTATING_TOOLS == frozenset({"write_file", "patch"})
+
+
+# ---------------------------------------------------------------------------
+# Vault-mutation success suppresses the false-alarm footer
+# ---------------------------------------------------------------------------
+
+
+from run_agent import _VAULT_MUTATING_MCP_TOOLS  # noqa: E402
+
+
+def _turn_agent() -> AIAgent:
+    """Bare agent with the full per-turn verifier state (mirrors turn_context)."""
+    agent = object.__new__(AIAgent)
+    agent._turn_failed_file_mutations = {}
+    agent._turn_file_mutation_paths = set()
+    agent._turn_vault_mutation_succeeded = False
+    return agent
+
+
+def _footer_would_show(agent) -> bool:
+    """Replicate the turn_finalizer gate for the failed-mutation footer."""
+    failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
+    vault_ok = getattr(agent, "_turn_vault_mutation_succeeded", False)
+    return bool(failed) and not vault_ok
+
+
+class TestVaultMutationSuppression:
+    def test_vault_write_success_sets_flag(self):
+        agent = _turn_agent()
+        ok = json.dumps({"success": True, "data": {"status": "written"}})
+        agent._record_file_mutation_result(
+            "mcp__turbovault__write_note", {"path": "生活/旅遊/x.md"}, ok, is_error=False,
+        )
+        assert agent._turn_vault_mutation_succeeded is True
+
+    def test_vault_edit_success_sets_flag(self):
+        agent = _turn_agent()
+        ok = json.dumps({"success": True, "data": {"blocks_applied": 1}})
+        agent._record_file_mutation_result(
+            "mcp__turbovault__edit_note", {"path": "生活/旅遊/x.md"}, ok, is_error=False,
+        )
+        assert agent._turn_vault_mutation_succeeded is True
+
+    def test_vault_error_does_not_set_flag(self):
+        agent = _turn_agent()
+        err = json.dumps({"error": "Parse error: No SEARCH/REPLACE blocks found in input"})
+        agent._record_file_mutation_result(
+            "mcp__turbovault__edit_note", {"path": "生活/旅遊/x.md"}, err, is_error=True,
+        )
+        assert agent._turn_vault_mutation_succeeded is False
+
+    def test_vault_success_plus_local_patch_failure_suppresses_footer(self):
+        # The exact production scenario: turbovault write lands, then a spurious
+        # local patch on the raw vault path fails — footer must be suppressed.
+        agent = _turn_agent()
+        agent._record_file_mutation_result(
+            "mcp__turbovault__write_note", {"path": "生活/旅遊/x.md"},
+            json.dumps({"success": True}), is_error=False,
+        )
+        agent._record_file_mutation_result(
+            "patch",
+            {"mode": "replace", "path": "/root/生活/旅遊/x.md", "old_string": "a", "new_string": "b"},
+            json.dumps({"success": False, "error": "Failed to read file"}), is_error=True,
+        )
+        assert agent._turn_failed_file_mutations              # failure was recorded
+        assert agent._turn_vault_mutation_succeeded is True
+        assert _footer_would_show(agent) is False             # …but footer suppressed
+
+    def test_local_failure_without_vault_success_still_warns(self):
+        # Safety net intact: nothing landed anywhere → footer still emitted.
+        agent = _turn_agent()
+        agent._record_file_mutation_result(
+            "patch",
+            {"mode": "replace", "path": "/root/x.md", "old_string": "a", "new_string": "b"},
+            json.dumps({"success": False, "error": "Failed to read file"}), is_error=True,
+        )
+        assert agent._turn_vault_mutation_succeeded is False
+        assert _footer_would_show(agent) is True
+
+    def test_vault_tool_set_shape(self):
+        assert _VAULT_MUTATING_MCP_TOOLS == frozenset({
+            "mcp__turbovault__write_note", "mcp__turbovault__edit_note",
+        })
