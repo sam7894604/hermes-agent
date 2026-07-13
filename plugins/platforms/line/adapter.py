@@ -860,18 +860,15 @@ class LineAdapter(BasePlatformAdapter):
             "LINE_OBSERVE_UNMENTIONED",
             bool(extra.get("observe_unmentioned", True)),
         )
-        # Cost/abuse guard for observed-media pre-extraction: per-chat sliding
-        # window of extraction timestamps. Beyond the cap we fall back to a
-        # lightweight placeholder (no download/vision) so a media flood in an
-        # authorized group can't run unbounded extraction. §6/§7.
-        self._observe_media_calls: Dict[str, Deque[float]] = {}
-        self._observe_media_max = int(
-            os.getenv("LINE_OBSERVE_MEDIA_MAX")
-            or extra.get("observe_media_max", 12)
-        )
-        self._observe_media_window = float(
-            os.getenv("LINE_OBSERVE_MEDIA_WINDOW")
-            or extra.get("observe_media_window", 3600)
+        # On-demand media backfill: observed (unmentioned) uploads are recorded
+        # as a lightweight placeholder ONLY; when the bot IS later triggered and
+        # the triggering message carries no media of its own, we look back at the
+        # recently-observed image/file uploads within this window and pull them
+        # into the current turn. Env default here; the live value comes from the
+        # Dashboard-editable ``media_backfill_window_minutes`` (see the store).
+        self._backfill_window_minutes_default = float(
+            os.getenv("LINE_MEDIA_BACKFILL_WINDOW_MIN")
+            or extra.get("media_backfill_window_minutes", 1)
         )
         # Name-resolution TTL cache: id -> (display_name, expiry_ts).
         self._name_cache: Dict[str, Tuple[str, float]] = {}
@@ -1264,6 +1261,19 @@ class LineAdapter(BasePlatformAdapter):
         else:
             text = f"[unsupported message type: {msg_type}]"
 
+        # On-demand media backfill (§6/§7): a triggering GROUP message that
+        # carries no media of its own — e.g. "@Toothless what's the amount on
+        # that receipt?" after silently uploading it — pulls in the recently
+        # OBSERVED image/file uploads within the backfill window so the current
+        # turn can actually see them (gateway runs vision / doc-extract on the
+        # appended paths). Complements quote-reply (explicit) for the "剛剛那張"
+        # case where the user didn't quote. No media of its own → only then.
+        if not media_urls and chat_type in {"group", "room"}:
+            bf_urls, bf_types = await self._backfill_recent_media(chat_id, chat_type)
+            if bf_urls:
+                media_urls.extend(bf_urls)
+                media_types.extend(bf_types)
+
         # Quote reply (§8): if this message quotes an earlier one, look the
         # original up in the transcript and prepend it as context.
         quote_ctx = await self._quote_context(source, chat_id, chat_type, msg)
@@ -1512,14 +1522,13 @@ class LineAdapter(BasePlatformAdapter):
         """Record a message as passive observed context (no agent turn).
 
         Media policy (§7): drop video/audio entirely; record text. Images and
-        files (PDF) are DOWNLOADED and PRE-EXTRACTED at observe time — an image
-        gets a vision description, a PDF its text — and that content is inlined
-        into the observed row, so a later @mention turn can reference "the file I
-        just sent" even though LINE doesn't allow @-ing an image/file upload.
-        Extraction is best-effort, rate-limited per chat, and still does NOT
-        trigger the agent (mention gate unchanged). The observed rows land in a
-        single shared, chat-scoped session (per-user identity dropped) so a
-        later @mention turn can load the whole group's context.
+        files are recorded as a LIGHTWEIGHT ``[image]`` / ``[file: name]``
+        placeholder together with their LINE ``platform_message_id`` — NO
+        download or extraction here (cheap). When the bot is later triggered and
+        the triggering message has no media of its own, ``_backfill_recent_media``
+        re-fetches these recently-observed uploads within the backfill window and
+        pulls them into that turn (on-demand, not per-message). The observed rows
+        land in a single shared, chat-scoped session (per-user identity dropped).
         """
         if not self._observe_unmentioned:
             return
@@ -1530,12 +1539,10 @@ class LineAdapter(BasePlatformAdapter):
             return  # dropped by policy — not recorded, not fetched
         if msg_type == "text":
             body = msg.get("text", "") or ""
-        elif msg_type == "image":
-            body = await self._observe_extract_media(chat_id, message_id, "image", "")
         elif msg_type == "file":
             fname = msg.get("fileName", "")
-            body = await self._observe_extract_media(chat_id, message_id, "file", fname)
-        elif msg_type in {"sticker", "location"}:
+            body = f"[file: {fname}]" if fname else "[file]"
+        elif msg_type in {"image", "sticker", "location"}:
             body = f"[{msg_type}]"
         else:
             body = f"[{msg_type}]"
@@ -1562,82 +1569,84 @@ class LineAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug("LINE: observe-record failed", exc_info=True)
 
-    def _observe_media_allowed(self, chat_id: str) -> bool:
-        """Sliding-window rate limit for observed-media pre-extraction so a
-        media flood in an authorized group can't run unbounded vision/PDF
-        extraction. Records the call when allowed."""
-        now = time.time()
-        window = self._observe_media_window
-        calls = self._observe_media_calls.setdefault(chat_id, deque())
-        while calls and (now - calls[0]) > window:
-            calls.popleft()
-        if len(calls) >= self._observe_media_max:
-            return False
-        calls.append(now)
-        return True
+    def _backfill_window_seconds(self) -> float:
+        """Live backfill window in seconds — Dashboard-editable
+        ``media_backfill_window_minutes`` (config, hot-reload), else the env/
+        extra default. 0 disables backfill."""
+        minutes = self._backfill_window_minutes_default
+        wl = getattr(self, "_whitelist", None)
+        if wl is not None:
+            try:
+                v = wl.get_settings().get("media_backfill_window_minutes")
+                if v is not None:
+                    minutes = float(v)
+            except Exception:
+                pass
+        return max(0.0, minutes) * 60.0
 
-    async def _observe_extract_media(
-        self, chat_id: str, message_id: str, kind: str, fname: str
-    ) -> str:
-        """Download an observed (unmentioned) image/file and pre-extract its
-        content so a later @mention turn can use it. Returns an inlineable
-        string; on any failure / over budget, falls back to the lightweight
-        ``[image]`` / ``[file: name]`` placeholder (never raises)."""
-        placeholder = (f"[file: {fname}]" if fname else "[file]") if kind == "file" else "[image]"
-        # §7 retention/filter + cost guard: only pre-extract within budget.
-        if not self._observe_media_allowed(chat_id):
-            return placeholder
+    async def _backfill_recent_media(
+        self, chat_id: str, chat_type: str,
+    ) -> Tuple[List[str], List[str]]:
+        """On-demand: when the bot is triggered but the triggering message has
+        no media, look back at recently-OBSERVED (unmentioned) image/file
+        uploads in this group within the backfill window and pull them into the
+        current turn. Returns ``(media_urls, media_types)`` for the gateway's
+        normal media pipeline (vision for images, doc-extract for PDFs) to
+        handle — so "@Toothless what's the amount on that receipt?" works even
+        though the image was never @-ed. Best-effort; never raises."""
+        window = self._backfill_window_seconds()
+        if window <= 0:
+            return [], []
+        store = getattr(self, "_session_store", None)
+        if store is None or chat_type not in {"group", "room"}:
+            return [], []
+        _MAX_BACKFILL = 3
         try:
-            downloaded = await self._download_media(
-                message_id, kind, file_name=fname
-            )
-        except Exception:
-            return placeholder
-        if not downloaded:
-            return placeholder
-        path, mime = downloaded
-        _MAX = 8000
-        try:
-            if kind == "image" or (mime or "").startswith("image/"):
-                from tools.vision_tools import vision_analyze_tool
-                prompt = (
-                    "Describe this image for later reference. If it is a receipt, "
-                    "invoice, bill or document, transcribe the key fields verbatim "
-                    "(merchant/name, dates, line items, and especially the total "
-                    "amount and currency)."
+            shared = self.build_source(chat_id=chat_id, chat_type=chat_type)
+            entry = store.get_or_create_session(shared)
+            db = getattr(store, "_db", None)
+            if db is None or not hasattr(db, "get_messages"):
+                return [], []
+            now = time.time()
+            candidates: List[Tuple[str, str]] = []  # (message_id, kind)
+            for row in db.get_messages(entry.session_id):
+                if not row.get("observed"):
+                    continue
+                ts = row.get("timestamp")
+                try:
+                    if ts is not None and (now - float(ts)) > window:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                mid = str(row.get("platform_message_id") or "")
+                if not mid:
+                    continue
+                content = str(row.get("content") or "")
+                if "[image]" in content:
+                    candidates.append((mid, "image"))
+                elif "[file" in content:
+                    candidates.append((mid, "file"))
+            # Most recent first, capped.
+            urls: List[str] = []
+            types: List[str] = []
+            for mid, kind in list(reversed(candidates))[:_MAX_BACKFILL]:
+                try:
+                    downloaded = await self._download_media(mid, kind)
+                except Exception:
+                    downloaded = None
+                if downloaded:
+                    path, mime = downloaded
+                    urls.append(path)
+                    types.append(mime or kind)
+            if urls:
+                logger.info(
+                    "LINE: backfilled %d recent observed media into trigger turn (chat %s, window %.0fs)",
+                    len(urls), chat_id, window,
                 )
-                res = await vision_analyze_tool(path, prompt)
-                data = json.loads(res) if isinstance(res, str) else (res or {})
-                desc = (data.get("analysis") or "").strip() if isinstance(data, dict) else ""
-                if desc:
-                    logger.info("LINE: observed image pre-analysed via vision (chat %s)", chat_id)
-                    return f"[image] {desc[:_MAX]}"
-                return placeholder
-            # file: best-effort PDF text-layer extraction (pymupdf). Scanned /
-            # Office go through the full pipeline only on the trigger path.
-            is_pdf = (mime == "application/pdf") or path.lower().endswith(".pdf")
-            if not is_pdf:
-                try:
-                    with open(path, "rb") as _f:
-                        is_pdf = _f.read(5) == b"%PDF-"
-                except Exception:
-                    is_pdf = False
-            if is_pdf:
-                try:
-                    import pymupdf
-                    doc = pymupdf.open(path)
-                    text = "\n".join(pg.get_text() for pg in doc).strip()
-                    doc.close()
-                except Exception:
-                    text = ""
-                label = f"[file: {fname}]" if fname else "[file: PDF]"
-                if text:
-                    logger.info("LINE: observed PDF pre-extracted text (chat %s)", chat_id)
-                    return f"{label}\n{text[:_MAX]}"
-                return label
+            return urls, types
         except Exception:
-            logger.debug("LINE: observe media extract failed", exc_info=True)
-        return placeholder
+            logger.debug("LINE: media backfill failed", exc_info=True)
+            return [], []
 
     async def _quote_context(
         self, source: Dict[str, Any], chat_id: str, chat_type: str,
