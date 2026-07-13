@@ -1129,6 +1129,10 @@ def build_turn_context(
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}
     agent._turn_file_mutation_paths = set()
+    # True once a turbovault (vault) write_note/edit_note succeeds this turn, so
+    # the verifier doesn't false-alarm when a co-occurring local file patch
+    # fallback fails but the vault write actually landed.
+    agent._turn_vault_mutation_succeeded = False
     agent._verification_stop_nudges = 0
     agent._pre_verify_nudges = 0
 

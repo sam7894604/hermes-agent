@@ -203,6 +203,15 @@ from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
     file_mutation_result_landed,
 )
+
+# turbovault MCP tools that write to the Obsidian vault. A success from any of
+# these means the turn's content mutation actually landed (in the vault), even
+# if a local write_file/patch fallback in the same turn failed. Used by the
+# file-mutation verifier to avoid a false "file were NOT modified" alarm.
+_VAULT_MUTATING_MCP_TOOLS = frozenset({
+    "mcp__turbovault__write_note",
+    "mcp__turbovault__edit_note",
+})
 from agent.trajectory import (
     convert_scratchpad_to_think,
     save_trajectory as _save_trajectory_to_file,
@@ -3411,7 +3420,23 @@ class AIAgent:
         model recovered within the turn).  Silently no-ops if the per-turn
         state dict hasn't been initialised yet (e.g. a tool dispatched
         outside ``run_conversation``).
+
+        Also records a turn-level flag when a turbovault (vault) write lands,
+        so the verifier footer can suppress a false alarm from a co-occurring
+        local file-patch fallback that failed while the real write went to the
+        vault via MCP (which the local write_file/patch tracking never sees).
         """
+        # Vault (turbovault MCP) mutation success — tracked for the verifier
+        # BEFORE the local-tool early-return below, because these tool names are
+        # deliberately NOT in _FILE_MUTATING_TOOLS. is_error is False only when
+        # the tool result carried no {"error": ...} (see _detect_tool_failure).
+        if (
+            not is_error
+            and tool_name in _VAULT_MUTATING_MCP_TOOLS
+            and hasattr(self, "_turn_vault_mutation_succeeded")
+        ):
+            self._turn_vault_mutation_succeeded = True
+
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
         state = getattr(self, "_turn_failed_file_mutations", None)
