@@ -5310,6 +5310,31 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     )
                 return tool_error(f"MCP server '{server_name}' is not connected")
 
+        # Deterministic arg repair for turbovault's ``edit_note``: weak models
+        # often emit ``SEARCH:``/``REPLACE:`` labels or ``old_string``/
+        # ``new_string`` JSON instead of aider SEARCH/REPLACE blocks, which the
+        # tool rejects ("No SEARCH/REPLACE blocks found in input"), forcing a
+        # full-overwrite fallback every edit. Normalize the known malformed
+        # shapes into canonical blocks before dispatch; unrecognized input is
+        # passed through untouched so turbovault stays the final authority.
+        if (
+            server_name == "turbovault"
+            and tool_name == "edit_note"
+            and isinstance(args, dict)
+            and "edits" in args
+        ):
+            try:
+                from tools.turbovault_edit_normalize import normalize_edits
+                _fixed, _changed = normalize_edits(args.get("edits"))
+                if _changed:
+                    args = {**args, "edits": _fixed}
+                    logger.info(
+                        "turbovault edit_note: normalized malformed "
+                        "SEARCH/REPLACE payload before dispatch"
+                    )
+            except Exception:
+                logger.debug("turbovault edit_note normalize failed", exc_info=True)
+
         async def _call():
             _mark_server_call_started(server)
             async with server._rpc_lock:
