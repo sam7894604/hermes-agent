@@ -180,6 +180,31 @@ class TestRouting:
         ad.handle_message.assert_not_called()
         ad._observe_record.assert_awaited_once()
 
+    async def test_quote_reply_of_bot_message_is_implicit_mention(self):
+        # Replying to (quoting) the bot's OWN message counts as a mention even
+        # without @Toothless -> triggers, no observe.
+        ad = _make_adapter()
+        ad._observe_record = AsyncMock()
+        ad._client = MagicMock()
+        ad._client.sent_message_ids = {"botmsg1"}   # id the bot previously sent
+        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
+        msg = {"type": "text", "id": "m1", "text": "多少錢", "quotedMessageId": "botmsg1"}
+        await ad._handle_message_event(_msg_event(src, msg), authorized=True)
+        ad.handle_message.assert_awaited_once()
+        ad._observe_record.assert_not_awaited()
+
+    async def test_quote_reply_of_other_message_still_observes(self):
+        # Quoting ANOTHER member's message is NOT an implicit mention -> observe.
+        ad = _make_adapter()
+        ad._observe_record = AsyncMock()
+        ad._client = MagicMock()
+        ad._client.sent_message_ids = {"botmsg1"}
+        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
+        msg = {"type": "text", "id": "m1", "text": "haha", "quotedMessageId": "someoneelse"}
+        await ad._handle_message_event(_msg_event(src, msg), authorized=True)
+        ad.handle_message.assert_not_called()
+        ad._observe_record.assert_awaited_once()
+
     async def test_authorized_group_no_mention_failopen_when_bot_id_unknown(self):
         # SAFETY: if get_bot_user_id() failed at connect (_bot_user_id is None),
         # _bot_mentioned can never be True. The mention gate must FAIL-OPEN —
@@ -296,3 +321,81 @@ class TestObserveAndQuote:
         ad.handle_message.assert_awaited_once()
         event_obj = ad.handle_message.await_args.args[0]
         assert "earlier message" in event_obj.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Observed-media pre-extraction (image -> vision, PDF -> text) with budget
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestObserveMediaExtract:
+
+    async def test_image_observed_is_vision_extracted(self, monkeypatch):
+        ad = _make_adapter()
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        import tools.vision_tools as vt
+        monkeypatch.setattr(
+            vt, "vision_analyze_tool",
+            AsyncMock(return_value='{"success": true, "analysis": "Receipt: Mongolian Wok Total 150000 IDR"}'),
+        )
+        body = await ad._observe_extract_media("Cok", "m1", "image", "")
+        assert body.startswith("[image] ") and "150000" in body
+        ad._download_media.assert_awaited_once()
+
+    async def test_pdf_observed_is_text_extracted(self, monkeypatch, tmp_path):
+        p = tmp_path / "r.pdf"
+        p.write_bytes(b"%PDF-1.4\n" + b"0" * 32)
+        ad = _make_adapter()
+        ad._download_media = AsyncMock(return_value=(str(p), "application/pdf"))
+        import sys, types
+        m = types.ModuleType("pymupdf")
+
+        class _Doc:
+            page_count = 1
+            def __iter__(self):
+                class _P:
+                    def get_text(self_inner):
+                        return "Aryaduta Bali USD 336.35"
+                return iter([_P()])
+            def close(self):
+                pass
+        m.open = lambda path: _Doc()
+        monkeypatch.setitem(sys.modules, "pymupdf", m)
+        body = await ad._observe_extract_media("Cok", "m2", "file", "receipt.pdf")
+        assert body.startswith("[file: receipt.pdf]") and "336.35" in body
+
+    async def test_over_budget_falls_back_to_placeholder(self):
+        ad = _make_adapter()
+        ad._observe_media_max = 1
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        assert ad._observe_media_allowed("Cok") is True   # consume the only slot
+        body = await ad._observe_extract_media("Cok", "m2", "image", "")
+        assert body == "[image]"
+        ad._download_media.assert_not_called()             # no download when over budget
+
+    async def test_download_failure_placeholder(self):
+        ad = _make_adapter()
+        ad._download_media = AsyncMock(return_value=None)
+        body = await ad._observe_extract_media("Cok", "m1", "file", "receipt.pdf")
+        assert body == "[file: receipt.pdf]"
+
+    async def test_authorized_group_image_no_mention_extracts_and_observes(self, monkeypatch):
+        # End-to-end through _handle_message_event: unmentioned image in an
+        # authorized group is observe-recorded (not triggered) with the vision
+        # content inlined so a later @mention can use it.
+        ad = _make_adapter()
+        ad._session_store = MagicMock()
+        ad._session_store.get_or_create_session.return_value = MagicMock(session_id="s1")
+        ad._download_media = AsyncMock(return_value=("/tmp/x.jpg", "image/jpeg"))
+        import tools.vision_tools as vt
+        monkeypatch.setattr(
+            vt, "vision_analyze_tool",
+            AsyncMock(return_value='{"success": true, "analysis": "Total 150000 IDR"}'),
+        )
+        src = {"type": "group", "groupId": "Cok", "userId": "Uy"}
+        await ad._handle_message_event(
+            _msg_event(src, {"type": "image", "id": "img1"}), authorized=True,
+        )
+        ad.handle_message.assert_not_called()               # observe only, no trigger
+        appended = ad._session_store.append_to_transcript.call_args.args[1]
+        assert appended["observed"] is True and "150000" in appended["content"]
