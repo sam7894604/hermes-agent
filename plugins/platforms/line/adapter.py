@@ -100,6 +100,10 @@ from gateway.platforms.base import (
     cache_video_from_bytes,
 )
 from gateway.config import Platform
+# LINE renders zero Markdown, so a GFM pipe table lands as literal "| a | b |"
+# rows in the bubble. Reuse the SAME shared converter Discord and Telegram
+# already use (PR #53284) rather than growing a LINE-specific one.
+from gateway.platforms.helpers import convert_table_to_bullets
 
 # Whitelist subsystem (Phase 1 — hot-reload store backed by config.yaml).
 # Relative import in the normal package context; fall back to the absolute
@@ -225,9 +229,22 @@ def strip_markdown_preserving_urls(text: str) -> str:
     Source: PR #18153 (leepoweii) — adapted to keep code-block content
     visible (LINE users frequently want command snippets to land as
     plain text, not be eaten by the fence).
+
+    Markdown tables are handled first by the shared ``convert_table_to_bullets``
+    (the same one Discord and Telegram call) — LINE has no table syntax either,
+    so a pipe table would otherwise survive this function as literal ``|`` rows.
     """
     if not text:
         return text
+
+    # Tables → bullet groups, via the shared cross-platform converter.
+    # MUST run before the un-fencing below: the converter deliberately skips
+    # fenced code blocks, but once the fences are stripped a table *inside* a
+    # code block would look like a real table and be wrongly converted.
+    # The converter emits "**heading**" + "• field: value"; the bold markers
+    # are stripped below and the "•" bullets pass through _MD_BULLET_RE
+    # untouched (it only matches -/*/+ markers), so the two compose cleanly.
+    text = convert_table_to_bullets(text)
 
     # Code blocks first — keep the inner content, drop the fences.
     def _unfence(m: re.Match) -> str:
