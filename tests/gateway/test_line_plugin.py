@@ -154,6 +154,36 @@ class TestMarkdownAndChunking:
     def test_italic_stripped(self):
         assert strip_markdown_preserving_urls("*hello*") == "hello"
 
+    def test_markdown_table_converted_to_bullets(self):
+        # LINE renders no table syntax — a GFM pipe table must not survive as
+        # literal "| a | b |" rows. Uses the shared convert_table_to_bullets()
+        # that Discord/Telegram already call (PR #53284).
+        md = (
+            "Here:\n\n"
+            "| Item | Cost |\n"
+            "|------|------|\n"
+            "| Coffee | 45000 |\n"
+            "| Lunch | 541420 |\n"
+        )
+        out = strip_markdown_preserving_urls(md)
+        assert "|" not in out                    # no raw pipes reach the bubble
+        assert "Coffee" in out and "Lunch" in out
+        assert "• Cost: 45000" in out
+        assert "• Cost: 541420" in out
+
+    def test_table_inside_code_fence_not_converted(self):
+        # The shared converter skips fenced blocks — and we run it BEFORE the
+        # un-fencing, so a table inside a code block stays verbatim.
+        md = "See:\n\n```\n| Item | Cost |\n|------|------|\n| Coffee | 45000 |\n```\n"
+        out = strip_markdown_preserving_urls(md)
+        assert "| Coffee | 45000 |" in out       # kept as literal text
+        assert "• Cost:" not in out              # not bullet-converted
+
+    def test_no_table_behaviour_unchanged(self):
+        # Regression guard: wiring the table converter in must not disturb the
+        # existing strip behaviour for ordinary text.
+        out = strip_markdown_preserving_urls("**bold** and [link](https://x.com)\n- a")
+        assert out == "bold and link (https://x.com)\n• a"
 
     def test_split_long_chunks_at_paragraph_boundary(self):
         text = "para1\n\npara2\n\npara3"
