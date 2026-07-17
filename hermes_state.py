@@ -6331,10 +6331,12 @@ class SessionDB:
         identifier — used for Nous Portal ``conversation=`` usage tagging.
         Returns *session_id* unchanged when it has no recorded parent.
         """
-        chain = self._session_lineage_root_to_tip(session_id)
+        chain = self._session_lineage_root_to_tip(session_id, only_model_switch=False)
         return (chain[0] if chain and chain[0] else session_id)
 
-    def _session_lineage_root_to_tip(self, session_id: str) -> List[str]:
+    def _session_lineage_root_to_tip(
+        self, session_id: str, *, only_model_switch: bool = True
+    ) -> List[str]:
         """Walk parent_session_id chain back to root, return [root, ..., tip].
 
         Only follows links where the **parent** session was ended with
@@ -6379,7 +6381,7 @@ class SessionDB:
                     if hasattr(parent_row, "keys")
                     else parent_row[0]
                 )
-                if parent_end_reason != "model_switch":
+                if only_model_switch and parent_end_reason != "model_switch":
                     break
                 current = parent_id
         return list(reversed(chain)) or [session_id]
