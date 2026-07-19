@@ -492,6 +492,7 @@ class TestAutomaticCompressionStateRefreshAfterLock:
             current_tokens=120_000,
             focus_topic=None,
             force=True,
+            provider_context='',
         )
         assert db.get_compression_lock_holder(session_id) is None
 
