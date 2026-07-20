@@ -2339,6 +2339,24 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
             client_kwargs["default_headers"] = existing
     except Exception:
         _ra().logger.debug("Copilot default-header guard skipped", exc_info=True)
+    # Cloudflare AI Gateway BYOK: when a primary client's base_url is routed
+    # through the gateway (e.g. GEMINI_BASE_URL / XAI_BASE_URL), CF rejects the
+    # request (401 AiGatewayError) unless the cf-aig-authorization header is
+    # present. Inject it from CF_AIG_TOKEN and clear api_key so CF supplies the
+    # stored provider key. Direct provider URLs are untouched. Token read from
+    # env only, never logged. (Mirrored by tools/transcription_tools for STT.)
+    _cf_base_url = str(client_kwargs.get("base_url", "") or "")
+    if "gateway.ai.cloudflare.com" in _cf_base_url:
+        try:
+            from hermes_cli.config import get_env_value
+            _aig_token = (get_env_value("CF_AIG_TOKEN") or "").strip()
+            if _aig_token:
+                _dh = dict(client_kwargs.get("default_headers") or {})
+                _dh["cf-aig-authorization"] = f"Bearer {_aig_token}"
+                client_kwargs["default_headers"] = _dh
+                client_kwargs["api_key"] = ""
+        except Exception:
+            pass
     # Uses the module-level `OpenAI` name, resolved lazily on first
     # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
     client = _ra().OpenAI(**client_kwargs)
