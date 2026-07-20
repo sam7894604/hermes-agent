@@ -180,6 +180,65 @@ class TestTranscribeGroq:
         assert "openai package" in result["error"]
 
 
+    _CF_URL = "https://gateway.ai.cloudflare.com/v1/acct/gw/groq"
+
+    def test_cf_gateway_injects_auth_header_and_clears_key(self, monkeypatch, sample_wav):
+        # When GROQ_BASE_URL is routed through Cloudflare AI Gateway, inject the
+        # cf-aig-authorization header (BYOK) and clear api_key so CF supplies the
+        # stored Groq key — otherwise the gateway returns 401 AiGatewayError.
+        monkeypatch.setattr("tools.transcription_tools.GROQ_BASE_URL", self._CF_URL)
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+        monkeypatch.setenv("CF_AIG_TOKEN", "cfut-fake-token")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hi"
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client) as m:
+            from tools.transcription_tools import _transcribe_groq
+            result = _transcribe_groq(sample_wav, "whisper-large-v3-turbo")
+
+        assert result["success"] is True
+        kw = m.call_args.kwargs
+        assert kw["default_headers"]["cf-aig-authorization"] == "Bearer cfut-fake-token"
+        assert kw["api_key"] == ""
+
+    def test_direct_groq_sends_no_cf_header(self, monkeypatch, sample_wav):
+        # Direct api.groq.com must stay untouched: no header, key preserved.
+        monkeypatch.setattr(
+            "tools.transcription_tools.GROQ_BASE_URL", "https://api.groq.com/openai/v1",
+        )
+        monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+        monkeypatch.setenv("CF_AIG_TOKEN", "cfut-should-be-ignored")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hi"
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client) as m:
+            from tools.transcription_tools import _transcribe_groq
+            result = _transcribe_groq(sample_wav, "whisper-large-v3-turbo")
+
+        assert result["success"] is True
+        kw = m.call_args.kwargs
+        assert "default_headers" not in kw
+        assert kw["api_key"] == "gsk-test"
+
+    def test_cf_gateway_works_without_local_groq_key(self, monkeypatch, sample_wav):
+        # BYOK: CF supplies the stored key, so a missing local GROQ_API_KEY must
+        # NOT short-circuit when going through the gateway.
+        monkeypatch.setattr("tools.transcription_tools.GROQ_BASE_URL", self._CF_URL)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setenv("CF_AIG_TOKEN", "cfut-fake-token")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "hi"
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("openai.OpenAI", return_value=mock_client) as m:
+            from tools.transcription_tools import _transcribe_groq
+            result = _transcribe_groq(sample_wav, "whisper-large-v3-turbo")
+
+        assert result["success"] is True
+        assert m.call_args.kwargs["default_headers"]["cf-aig-authorization"] == "Bearer cfut-fake-token"
+
     def test_null_groq_subsection_is_safe(self, monkeypatch, sample_wav):
         """`stt.groq: null` in YAML yields None; must not raise, auto-detect stays intact."""
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
