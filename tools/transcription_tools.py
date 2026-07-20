@@ -1831,9 +1831,22 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
     ``stt.groq.language`` > ``stt.language`` (config.yaml) >
     ``HERMES_LOCAL_STT_LANGUAGE`` (env). When none is set, Groq
     Whisper auto-detects.
+
+    Supports routing ``GROQ_BASE_URL`` through a Cloudflare AI Gateway: when the
+    base URL points at ``gateway.ai.cloudflare.com`` the gateway rejects the
+    request (401 ``AiGatewayError``) unless a ``cf-aig-authorization`` header is
+    present, so we inject it from ``CF_AIG_TOKEN`` — mirroring the primary-client
+    injection in ``agent_runtime_helpers``. In that BYOK mode the gateway supplies
+    the stored Groq key, so ``GROQ_API_KEY`` may be absent locally. Direct
+    ``api.groq.com`` is left untouched (no header, key required as before).
     """
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
-    if not api_key:
+    base_url = GROQ_BASE_URL or ""
+    via_cf_gateway = "gateway.ai.cloudflare.com" in base_url
+    # Token read from env only, never logged.
+    aig_token = (get_env_value("CF_AIG_TOKEN") or "").strip() if via_cf_gateway else ""
+    # Need a direct Groq key, OR (through the gateway) the CF gateway token.
+    if not api_key and not aig_token:
         return {"success": False, "transcript": "", "error": "GROQ_API_KEY not set"}
 
     if not _HAS_OPENAI:
@@ -1848,7 +1861,21 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 
     try:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
-        client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key or "",
+            "base_url": base_url,
+            "timeout": 30,
+            "max_retries": 0,
+        }
+        if aig_token:
+            # Cloudflare AI Gateway BYOK: authenticate to the gateway with the
+            # cf-aig-authorization header and let CF supply the stored Groq key
+            # (api_key cleared, same as the primary OpenAI client path).
+            client_kwargs["default_headers"] = {
+                "cf-aig-authorization": f"Bearer {aig_token}"
+            }
+            client_kwargs["api_key"] = ""
+        client = OpenAI(**client_kwargs)
         try:
             create_kwargs = {
                 "model": model_name,
