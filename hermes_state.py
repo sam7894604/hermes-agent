@@ -7030,8 +7030,15 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         when there are no ancestors), causing duplication. This method
         returns ONLY the genuine ancestor messages, identified by
         ``session_id != tip_session_id``. (#65919)
+
+        Walks ALL parent links (``only_model_switch=False``): the display
+        transcript includes compression/branch ancestors, so the display
+        prefix must match. The model-history path (``load_transcript``)
+        keeps the model_switch-only restriction.
         """
-        session_ids = self._session_lineage_root_to_tip(session_id)
+        session_ids = self._session_lineage_root_to_tip(
+            session_id, only_model_switch=False
+        )
         if len(session_ids) <= 1:
             return []
         with self._lock:
