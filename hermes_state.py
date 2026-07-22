@@ -5592,8 +5592,11 @@ class SessionDB:
                 parent_id = row["parent_session_id"] if hasattr(row, "keys") else row[0]
                 if not parent_id:
                     break
-                # Only follow the link when the parent was ended by a
-                # model switch — compression and other split types have
+                # Follow the link when the parent was ended by a model
+                # switch OR is still open (no end_reason — e.g. delegate
+                # subagents / forks whose parent keeps running; upstream
+                # #65919 expects those ancestors in the display prefix).
+                # Compression and other summarising split types have
                 # their own continuation semantics and must not be
                 # replayed as raw ancestor messages.
                 parent_row = self._conn.execute(
@@ -5607,7 +5610,11 @@ class SessionDB:
                     if hasattr(parent_row, "keys")
                     else parent_row[0]
                 )
-                if only_model_switch and parent_end_reason != "model_switch":
+                if only_model_switch and parent_end_reason not in (
+                    None,
+                    "",
+                    "model_switch",
+                ):
                     break
                 current = parent_id
         return list(reversed(chain)) or [session_id]
