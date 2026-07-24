@@ -97,6 +97,10 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("openrouter/pareto-code",                 "auto-routes to cheapest coder meeting openrouter.min_coding_score"),
     # Free tier
     ("openrouter/elephant-alpha",              "free"),
+    # Custom (SinyiLiou): re-add owl-alpha dropped upstream by #60943 — kept
+    # available on our deployment. Lives as a top-of-main custom commit so the
+    # daily upstream rebase replays it and no live-side sed backfill is needed.
+    ("openrouter/owl-alpha",                   "free"),
     ("poolside/laguna-m.1:free",               "free"),
     ("tencent/hy3:free",                       "free"),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
