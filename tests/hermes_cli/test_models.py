@@ -448,3 +448,23 @@ class TestClaudeSonnet5InCuratedLists:
         assert "claude-sonnet-5" in _PROVIDER_MODELS["anthropic"]
 
 
+
+
+
+class TestOwlAlphaInCuratedFreeTier:
+    """Regression: openrouter/owl-alpha must stay in the curated free-tier list.
+
+    Upstream added owl-alpha (#18071) then dropped it (#60943). We keep it
+    available on our deployment as a top-of-main custom commit so the daily
+    upstream rebase replays it — replacing the fragile live-side sed backfill.
+    """
+
+    def test_openrouter_fallback_includes_owl_alpha(self):
+        from hermes_cli.models import OPENROUTER_MODELS
+        ids = [mid for mid, _ in OPENROUTER_MODELS]
+        assert "openrouter/owl-alpha" in ids
+
+    def test_owl_alpha_marked_free_tier(self):
+        from hermes_cli.models import OPENROUTER_MODELS
+        tier = dict(OPENROUTER_MODELS).get("openrouter/owl-alpha")
+        assert tier == "free"
