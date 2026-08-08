@@ -8778,7 +8778,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
     def get_resume_message_count(self, session_id: str) -> int:
         """Count active rows that a full resume would materialize."""
-        session_ids = self._session_lineage_root_to_tip(session_id)
+        # Resume SIZE guards must span the FULL lineage (compression
+        # ancestors included) to match upstream semantics; the fork's
+        # model_switch-only narrowing applies to raw REPLAY paths, not
+        # to how many rows a full resume would materialize.
+        session_ids = self._session_lineage_root_to_tip(
+            session_id, only_model_switch=False
+        )
         placeholders = ",".join("?" for _ in session_ids)
         with self._read_ctx() as conn:
             row = conn.execute(
@@ -8809,7 +8815,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             # return value, and an unbounded lineage COUNT here would do the
             # exact pathological work the disable exists to avoid.
             return 0
-        session_ids = self._session_lineage_root_to_tip(session_id)
+        # Resume SIZE guards must span the FULL lineage (compression
+        # ancestors included) to match upstream semantics; the fork's
+        # model_switch-only narrowing applies to raw REPLAY paths, not
+        # to how many rows a full resume would materialize.
+        session_ids = self._session_lineage_root_to_tip(
+            session_id, only_model_switch=False
+        )
         placeholders = ",".join("?" for _ in session_ids)
         with self._read_ctx() as conn:
             row = conn.execute(
