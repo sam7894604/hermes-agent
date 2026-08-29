@@ -253,6 +253,7 @@ export const applyDisplay = (
   setVoiceRecordKey?: (v: ParsedVoiceRecordKey) => void
 ) => {
   const d = cfg?.config?.display ?? {}
+  const approvals = cfg?.config?.approvals
 
   setBell(!!d.bell_on_complete)
 
@@ -273,6 +274,10 @@ export const applyDisplay = (
     battery: !!d.battery,
     busyInputMode: normalizeBusyInputMode(d.busy_input_mode),
     compact: !!d.tui_compact,
+    // Fail safe: only YAML boolean false disables the prompt. A transient
+    // config RPC failure (cfg=null) preserves the last known policy instead
+    // of silently changing approval behavior until the next successful poll.
+    ...(cfg ? { destructiveSlashConfirm: approvals?.destructive_slash_confirm !== false } : {}),
     detailsMode: resolveDetailsMode(d),
     detailsModeCommandOverride: false,
     focusView: !!d.focus_view,
@@ -285,7 +290,10 @@ export const applyDisplay = (
     showReasoning: !!d.show_reasoning,
     showTokens: !!d.show_message_tokens,
     statusBar: normalizeStatusBar(d.tui_statusbar),
-    streaming: d.streaming !== false
+    streaming: d.streaming !== false,
+    // The SAME key that stamps [HH:MM] on classic-CLI labels (#41531) —
+    // no separate TUI knob.
+    timestamps: d.timestamps === true
   })
 }
 

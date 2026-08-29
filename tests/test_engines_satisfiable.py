@@ -19,7 +19,6 @@ declare and the toolchain that has to satisfy it.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -117,18 +116,39 @@ class TestEnginesAreSatisfiable:
         else:  # pragma: no cover - install.sh always defines it
             pytest.fail("install.sh does not define NODE_VERSION")
 
-        # install.sh fetches latest-v{major}.x, not {major}.0.0, so compare on
-        # the major: the newest release of that line must be able to clear the
-        # floor. A floor in a HIGHER major than we provision can never be met.
-        floor_majors = [
-            int(m.group(1))
-            for m in re.finditer(r">=\s*v?(\d+)", node_range)
-        ]
-        assert floor_majors, f"cannot read a floor out of {node_range!r}"
-        assert managed_major >= min(floor_majors), (
+        # install.sh fetches latest-v{major}.x, not {major}.0.0. Use a high
+        # representative release from that major so ranges that enumerate LTS
+        # lines (rather than one continuous floor) are checked correctly.
+        managed_release = f"{managed_major}.999.999"
+        assert _satisfies_range(managed_release, node_range), (
             f"engines.node is {node_range!r} but install.sh provisions Node "
             f"{managed_major}.x. The runtime we ship must satisfy the floor we "
             "declare, or the install we just performed cannot install deps."
+        )
+
+    def test_managed_node_bundles_an_npm_the_engines_accept(self):
+        """The Node major install.sh fetches must ship an npm that clears
+        engines.npm. Node 22 bundles 11.16.0, which is in the excluded
+        11.10–11.16 band — fresh Hermes-managed installs then die at
+        `npm ci` with EBADENGINE (#80769).
+        """
+        npm_range = _root_manifest()["engines"]["npm"]
+        install_sh = (REPO_ROOT / "scripts" / "install.sh").read_text()
+        for line in install_sh.splitlines():
+            if line.startswith("NODE_VERSION="):
+                managed_major = int(line.split("=", 1)[1].strip().strip('"').strip("'"))
+                break
+        else:  # pragma: no cover
+            pytest.fail("install.sh does not define NODE_VERSION")
+        stock_npm = _STOCK_NPM_BY_NODE_MAJOR.get(managed_major)
+        assert stock_npm is not None, (
+            f"install.sh NODE_VERSION={managed_major} is not in the known "
+            f"stock map {_STOCK_NPM_BY_NODE_MAJOR}"
+        )
+        assert _satisfies_range(stock_npm, npm_range), (
+            f"install.sh provisions Node {managed_major}.x (stock npm "
+            f"{stock_npm}), but engines.npm is {npm_range!r}. A fresh "
+            "Hermes-managed install cannot run npm ci."
         )
 
     def test_desktop_node_floor_is_not_stricter_than_its_toolchain(self):

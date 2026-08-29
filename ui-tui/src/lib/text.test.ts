@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { formatAbandonedClarify, formatTokenCount, stripTrailingPasteNewlines } from './text.js'
+import {
+  clarifyBatchRevisitState,
+  formatAbandonedClarify,
+  formatAbandonedClarifyBatch,
+  formatTokenCount,
+  stripTrailingPasteNewlines
+} from './text.js'
 
 describe('formatTokenCount', () => {
   it('matches the backend K/M rules', () => {
@@ -68,5 +74,45 @@ describe('formatAbandonedClarify', () => {
 
     expect(out).toContain('  1. first')
     expect(out).not.toContain('  0.')
+  })
+})
+
+describe('formatAbandonedClarifyBatch', () => {
+  it('shows locked answers and marks unanswered questions', () => {
+    const out = formatAbandonedClarifyBatch(
+      [
+        { qid: 'q0', question: 'One?' },
+        { qid: 'q1', question: 'Two?' }
+      ],
+      { q0: 'alpha' },
+      'timed out'
+    )
+
+    expect(out).toBe(['ask (2 questions)', '  ✓ One? → alpha', '  · Two? (no answer)', '  (timed out)'].join('\n'))
+  })
+
+  it('treats an empty locked answer as unanswered in the record', () => {
+    const out = formatAbandonedClarifyBatch([{ qid: 'q0', question: 'One?' }], { q0: '' }, 'cancelled')
+
+    expect(out).toContain('· One? (no answer)')
+  })
+})
+
+describe('clarifyBatchRevisitState', () => {
+  it('restores the cursor onto a choice answer', () => {
+    expect(clarifyBatchRevisitState(['red', 'blue'], 'blue')).toEqual({ custom: '', sel: 1 })
+  })
+
+  it('stages a typed answer on the Other row for editing', () => {
+    expect(clarifyBatchRevisitState(['red', 'blue'], 'chartreuse')).toEqual({ custom: 'chartreuse', sel: 2 })
+  })
+
+  it('stages a typed answer for an open-ended question (no choices)', () => {
+    expect(clarifyBatchRevisitState([], 'free text')).toEqual({ custom: 'free text', sel: 0 })
+  })
+
+  it('resets cleanly for unanswered and empty answers', () => {
+    expect(clarifyBatchRevisitState(['red'], undefined)).toEqual({ custom: '', sel: 0 })
+    expect(clarifyBatchRevisitState(['red'], '')).toEqual({ custom: '', sel: 0 })
   })
 })
