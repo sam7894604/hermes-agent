@@ -14393,7 +14393,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         """
         session_ids = [session_id]
         if include_ancestors and not self._is_explicit_branch_session(session_id):
-            session_ids = self._session_lineage_root_to_tip(session_id)
+            session_ids = self._session_lineage_root_to_tip(
+                session_id, only_model_switch=True
+            )
 
         if include_inactive:
             active_clause = ""
@@ -14864,15 +14866,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         when there are no ancestors), causing duplication. This method
         returns ONLY the genuine ancestor messages, identified by
         ``session_id != tip_session_id``. (#65919)
-
-        Walks ALL parent links (``only_model_switch=False``): the display
-        transcript includes compression/branch ancestors, so the display
-        prefix must match. The model-history path (``load_transcript``)
-        keeps the model_switch-only restriction.
         """
-        session_ids = self._session_lineage_root_to_tip(
-            session_id, only_model_switch=False
-        )
+        session_ids = self._resume_lineage_ids(session_id)
         if len(session_ids) <= 1:
             return []
         with self._read_ctx() as conn:
@@ -14952,7 +14947,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         return (chain[0] if chain and chain[0] else session_id)
 
     def _session_lineage_root_to_tip(
-        self, session_id: str, *, only_model_switch: bool = True
+        self, session_id: str, *, only_model_switch: bool = False
     ) -> List[str]:
         """Walk parent_session_id chain back to root, return [root, ..., tip].
 
