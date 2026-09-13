@@ -486,11 +486,28 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         if server is None:
             return error
 
+        # Deterministic arg repair for turbovault's ``edit_note``: weak models often emit
+        # ``SEARCH:``/``REPLACE:`` labels or ``old_string``/``new_string`` JSON instead of
+        # aider SEARCH/REPLACE blocks, which the tool rejects ("No SEARCH/REPLACE blocks
+        # found in input") -- forcing a full-overwrite fallback on every edit. Normalize the
+        # known malformed shapes before dispatch; anything unrecognized passes through
+        # untouched so turbovault stays the final authority on what is valid.
+        call_args = args
+        if server_name == "turbovault" and tool_name == "edit_note" and isinstance(args, dict) and "edits" in args:
+            try:
+                from tools.turbovault_edit_normalize import normalize_edits
+                _fixed, _changed = normalize_edits(args.get("edits"))
+                if _changed:
+                    call_args = {**args, "edits": _fixed}
+                    logger.info("turbovault edit_note: normalized malformed SEARCH/REPLACE payload before dispatch")
+            except Exception:
+                logger.debug("turbovault edit_note normalize failed", exc_info=True)
+
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op):
                 server._pending_call_context = contextvars.copy_context()  # for the elicitation callback
                 try:
-                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
+                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, call_args)
                 finally:
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy

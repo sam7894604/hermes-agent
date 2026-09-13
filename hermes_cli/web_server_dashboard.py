@@ -480,7 +480,15 @@ def _dashboard_plugin_search_dirs() -> List[tuple]:
     if root_plugins.resolve(strict=False) != user_plugin_roots[0].resolve(strict=False):
         user_plugin_roots.append(root_plugins)
     search_dirs = [(d, "user") for d in user_plugin_roots]
-    search_dirs += [(bundled_root / "memory", "bundled"), (bundled_root, "bundled")]
+    search_dirs += [
+        (bundled_root / "memory", "bundled"),
+        # Platform plugins nest their dashboard one tier deeper
+        # (plugins/platforms/<name>/dashboard/), and the discovery glob below is
+        # single-level, so this tier has to be listed explicitly -- otherwise e.g.
+        # the LINE whitelist dashboard exists but never appears in the UI.
+        (bundled_root / "platforms", "bundled"),
+        (bundled_root, "bundled"),
+    ]
     # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)`` check treated *any* non-empty
     # string as truthy, so ``=0``, ``=false``, and ``=no`` — all of which the agent loader and operators
     # correctly read as "disabled" — silently *enabled* the untrusted project source in the web server.
