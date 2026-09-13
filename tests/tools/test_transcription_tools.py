@@ -200,7 +200,7 @@ class TestTranscribeGroq:
         # When GROQ_BASE_URL is routed through Cloudflare AI Gateway, inject the
         # cf-aig-authorization header (BYOK) and clear api_key so CF supplies the
         # stored Groq key — otherwise the gateway returns 401 AiGatewayError.
-        monkeypatch.setattr("tools.transcription_tools.GROQ_BASE_URL", self._CF_URL)
+        monkeypatch.setattr("tools.transcription_common.GROQ_BASE_URL", self._CF_URL)
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
         monkeypatch.setenv("CF_AIG_TOKEN", "cfut-fake-token")
 
@@ -219,7 +219,7 @@ class TestTranscribeGroq:
     def test_direct_groq_sends_no_cf_header(self, monkeypatch, sample_wav):
         # Direct api.groq.com must stay untouched: no header, key preserved.
         monkeypatch.setattr(
-            "tools.transcription_tools.GROQ_BASE_URL", "https://api.groq.com/openai/v1",
+            "tools.transcription_common.GROQ_BASE_URL", "https://api.groq.com/openai/v1",
         )
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
         monkeypatch.setenv("CF_AIG_TOKEN", "cfut-should-be-ignored")
@@ -239,7 +239,7 @@ class TestTranscribeGroq:
     def test_cf_gateway_works_without_local_groq_key(self, monkeypatch, sample_wav):
         # BYOK: CF supplies the stored key, so a missing local GROQ_API_KEY must
         # NOT short-circuit when going through the gateway.
-        monkeypatch.setattr("tools.transcription_tools.GROQ_BASE_URL", self._CF_URL)
+        monkeypatch.setattr("tools.transcription_common.GROQ_BASE_URL", self._CF_URL)
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         monkeypatch.setenv("CF_AIG_TOKEN", "cfut-fake-token")
 
