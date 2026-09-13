@@ -1489,6 +1489,41 @@ class GatewayInboundMixin:
             message_text = f"{context_note}\n\n{message_text}"
         return message_text
 
+    async def _append_inbound_document_extracts(self, event: MessageEvent, message_text: str) -> str:
+        """Inline each attached document's text after the context notes.
+
+        The notes tell the agent a file exists and where; this puts the CONTENT
+        in front of it in the same turn, so reading an attachment does not depend
+        on the model deciding to call ``read_file``. A weak or distracted model
+        would otherwise never open the file at all.
+
+        Mirrors the note loop's filtering exactly (media routed as image/audio/
+        video is handled elsewhere). Best-effort per file: an extractor that is
+        missing or fails leaves the path-pointing note as the fallback.
+        """
+        from gateway.run import (
+            _event_media_is_audio, _event_media_is_image, _event_media_is_video,
+        )
+        if not event.media_urls:
+            return message_text
+        import mimetypes as _mimetypes
+
+        for i, path in enumerate(event.media_urls):
+            if any(f(event, i) for f in (_event_media_is_image, _event_media_is_audio, _event_media_is_video)):
+                continue
+            mtype = event.media_types[i] if i < len(event.media_types) else ""
+            if mtype in {"", "application/octet-stream"}:
+                mtype = _mimetypes.guess_type(path)[0] or "application/octet-stream"
+            display_name, _agent_path = self._inbound_attachment_display_name(path)
+            try:
+                extracted = await self._auto_extract_document(path, mtype, display_name)
+            except Exception as exc:
+                logger.debug("Auto-doc extraction failed for %s: %s", path, exc)
+                continue
+            if extracted:
+                message_text = f"{message_text}\n\n{extracted}"
+        return message_text
+
     @staticmethod
     def _prepend_inbound_reply_context(event: MessageEvent, source: SessionSource, message_text: str) -> str:
         """Prepend the Discord triggering-message id and the reply-to pointer."""
@@ -1631,6 +1666,7 @@ class GatewayInboundMixin:
             message_text = await self._enrich_inbound_voice(event, source, message_text, audio_paths)
         message_text = self._prepend_inbound_media_file_notes(message_text, audio_file_paths, video_paths)
         message_text = self._prepend_inbound_document_notes(event, message_text)
+        message_text = await self._append_inbound_document_extracts(event, message_text)
         if "@" in message_text:
             message_text = await self._expand_inbound_context_references(source, session_key, message_text)
             if message_text is None:

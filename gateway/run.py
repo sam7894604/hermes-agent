@@ -4333,17 +4333,20 @@ class GatewayRunner(
     ) -> Optional[str]:
         """Gateway-time extraction of an attached document's content so it
         reaches the agent inline — reliable and automatic, not left to the model
-        to decide whether to run a tool. Dispatches by type to whatever
-        extractor is already available in the venv (no lazy install):
+        to decide whether to call ``read_file``. Dispatches by type:
 
           * PDF          -> pymupdf (text) / render + vision for scanned pages
           * text family  -> read directly (txt/md/csv/json/xml/yaml/log/code…)
-          * DOCX         -> python-docx
-          * XLSX         -> openpyxl
+          * everything    -> ``tools.read_extract.extract_document_text``
+            else            (DOCX/XLSX/IPYNB native; PPTX + legacy binary Office,
+                             OpenDocument, RTF and EPUB via anydoc)
 
-        Formats with no bundled extractor (PPTX, legacy .doc/.ppt/.xls, archives,
-        video) return None and fall back to the path-pointing context note — see
-        the audit for known gaps. Best-effort; never raises."""
+        The PDF branch stays local because ``read_extract`` has no fallback for a
+        scanned page: without a hosted-OCR key it only warns, whereas the vision
+        path here uses the model the operator already configured.
+
+        Archives, video and unknown binaries return None and fall back to the
+        path-pointing context note. Best-effort; never raises."""
         _MAX = 20000
         ext = os.path.splitext(real_path)[1].lower()
         try:
@@ -4376,119 +4379,34 @@ class GatewayRunner(
                     logger.debug("Auto-doc: text read failed: %s", exc)
                     return None
 
-            if ext == ".docx":
+            # Everything else upstream's extractor understands goes to that single
+            # backend: DOCX / XLSX / IPYNB natively, and the PPTX + legacy binary
+            # Office / OpenDocument / RTF / EPUB family through anydoc. The fork's
+            # headless-LibreOffice bridge is gone -- anydoc covers the same formats
+            # without a deployer-installed soffice, and one extraction stack beats
+            # two that drift apart. PDFs never reach here (handled above, because
+            # the vision fallback for scanned pages has no upstream equivalent).
+            from tools.read_extract import (
+                ANYDOC_EXTENSIONS, EXTRACTABLE_EXTENSIONS, ExtractionError,
+                extract_document_text,
+            )
+            if ext in (EXTRACTABLE_EXTENSIONS | ANYDOC_EXTENSIONS):
                 try:
-                    import docx  # python-docx
-                    d = docx.Document(real_path)
-                    parts = [p.text for p in d.paragraphs if p.text]
-                    for tbl in d.tables:
-                        for row in tbl.rows:
-                            parts.append("\t".join(c.text for c in row.cells))
-                    logger.info("Auto-doc: extracted Word doc '%s'", display_name)
-                    return _wrap("Word document text", "\n".join(parts))
-                except Exception as exc:
-                    logger.debug("Auto-doc: docx extract failed: %s", exc)
+                    body = await asyncio.to_thread(extract_document_text, real_path)
+                except ExtractionError as exc:
+                    # Carries the "install anydoc" teaching text for gated formats.
+                    # The agent still gets the path-pointing context note.
+                    logger.info("Auto-doc: cannot extract '%s': %s", display_name, exc)
                     return None
-
-            if ext == ".xlsx":
-                try:
-                    import openpyxl
-                    wb = openpyxl.load_workbook(real_path, read_only=True, data_only=True)
-                    out: List[str] = []
-                    for ws in wb.worksheets:
-                        out.append(f"# Sheet: {ws.title}")
-                        for row in ws.iter_rows(values_only=True):
-                            cells = ["" if c is None else str(c) for c in row]
-                            if any(cells):
-                                out.append("\t".join(cells))
-                        if sum(len(x) for x in out) > _MAX:
-                            break
-                    logger.info("Auto-doc: extracted spreadsheet '%s'", display_name)
-                    return _wrap("spreadsheet", "\n".join(out))
                 except Exception as exc:
-                    logger.debug("Auto-doc: xlsx extract failed: %s", exc)
+                    logger.debug("Auto-doc: read_extract failed for %s: %s", real_path, exc)
                     return None
-
-            # New PowerPoint + EVERY legacy binary Office format go through a
-            # headless-LibreOffice -> PDF bridge, then the existing PDF text /
-            # vision pipeline reads the result. One dependency (deployer-installed
-            # soffice) covers new + old; docx/xlsx stay on the faster native path.
-            _OFFICE_VIA_LIBREOFFICE = {
-                ".pptx", ".ppt", ".doc", ".xls",
-                ".odt", ".ods", ".odp", ".rtf",
-            }
-            if ext in _OFFICE_VIA_LIBREOFFICE:
-                return await self._office_via_libreoffice(real_path, display_name)
+                logger.info("Auto-doc: extracted '%s' via read_extract (%s)", display_name, ext)
+                return _wrap("document text", body)
         except Exception as exc:
             logger.debug("Auto-doc extract failed for %s: %s", real_path, exc)
         # Unsupported here (archive/binary/unknown) -> context note.
         return None
-
-    async def _office_via_libreoffice(
-        self, real_path: str, display_name: str
-    ) -> Optional[str]:
-        """Convert a PowerPoint / legacy binary Office file with headless
-        LibreOffice, then read the result through the native pipeline. Requires
-        the deployer-installed ``soffice`` binary — a deliberate one-time install,
-        distinct from the disabled agent-runtime lazy installs.
-
-        Spreadsheets (.xls/.ods) convert to XLSX and are read with openpyxl so
-        full cell values survive — a PDF render would clip each cell to its
-        (often narrow) column width. Documents and presentations convert to PDF
-        and go through the text/vision pipeline. Returns None if soffice is
-        unavailable or the conversion fails (falls to the context note)."""
-        import shutil
-        import tempfile
-        soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if not soffice:
-            logger.info(
-                "Auto-doc: '%s' needs LibreOffice to extract but soffice is not "
-                "installed; falling back to the context note", display_name,
-            )
-            return None
-        ext = os.path.splitext(real_path)[1].lower()
-        # Spreadsheets -> XLSX (full cell values); everything else -> PDF.
-        target = "xlsx" if ext in {".xls", ".ods", ".xlsb", ".fods"} else "pdf"
-        outdir = tempfile.mkdtemp(prefix="hermes_lo_")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                soffice, "--headless", "--nologo", "--nofirststartwizard",
-                "--convert-to", target, "--outdir", outdir, real_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                # Isolated HOME so concurrent conversions don't fight over the
-                # single-user LibreOffice profile lock.
-                env={**os.environ, "HOME": outdir},
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=90)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                logger.debug("Auto-doc: LibreOffice convert timed out for %s", real_path)
-                return None
-            stem = os.path.splitext(os.path.basename(real_path))[0]
-            out_path = os.path.join(outdir, stem + "." + target)
-            if not os.path.exists(out_path):
-                logger.debug("Auto-doc: LibreOffice produced no %s for %s", target, real_path)
-                return None
-            logger.info("Auto-doc: converted '%s' via LibreOffice -> %s", display_name, target.upper())
-            if target == "xlsx":
-                # Re-enter the dispatcher; the converted .xlsx hits the native
-                # openpyxl branch (full cell values, no column clipping).
-                return await self._auto_extract_document(
-                    out_path,
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    display_name,
-                )
-            return await self._auto_extract_pdf(out_path, display_name)
-        except Exception as exc:
-            logger.debug("Auto-doc: LibreOffice bridge failed for %s: %s", real_path, exc)
-            return None
-        finally:
-            shutil.rmtree(outdir, ignore_errors=True)
 
     async def _auto_extract_pdf(self, real_path: str, display_name: str) -> Optional[str]:
         """Extract PDF content at gateway time so it reaches the agent inline —
