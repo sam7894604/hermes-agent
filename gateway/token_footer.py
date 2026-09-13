@@ -1,19 +1,24 @@
 """Build the per-message token-breakdown footer line for bot replies.
 
 Gated per-session by the ``/tokens`` toggle (see the gateway's
-``_tokens_display`` map). The numbers are decoded from the bit-packed
-``token_count`` on the turn's messages (see :mod:`hermes_token_codec`) — the
-final assistant row carries output/reasoning, the prompt-tail user/tool row
-carries total_input/cache_read.
+``_tokens_display`` map). The numbers are the turn's canonical usage as the
+provider reported it — recorded by
+:func:`agent.turn_usage.record_response_usage` onto ``agent._last_turn_usage``
+and surfaced on the turn result as ``last_turn_usage`` — i.e. the same counts
+the compressor and cost accounting use, not a separately derived per-message
+tally.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 
-def _decode(role: Optional[str], token_count: Any) -> Dict[str, int]:
-    from hermes_token_codec import resolve_message_tokens
-    return resolve_message_tokens(role, token_count)
+def _int(value: Any) -> int:
+    """Non-negative int, or 0 for missing/garbage (footers never raise)."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_token_line(agent_result: Dict[str, Any]) -> str:
@@ -22,38 +27,24 @@ def build_token_line(agent_result: Dict[str, Any]) -> str:
     Wrapped in inline-code backticks so it reads as a discreet information
     block appended to the reply tail (renders as monospace on Telegram /
     Discord / Slack etc.; harmless literal backticks on plain-text platforms).
-    Magnitudes use :func:`hermes_token_codec.format_token_count` (K/M).
+    Magnitudes use :func:`agent.usage_pricing.format_token_count_compact`.
     Example: ```📊 in:1.52K out:234 rsn:128 cache:890```.
     """
-    from hermes_token_codec import format_token_count as _f
-    messages: List[Dict[str, Any]] = agent_result.get("messages") or []
+    from agent.usage_pricing import format_token_count_compact as _f
 
-    out_tokens = reason_tokens = in_tokens = cache_tokens = 0
+    usage = agent_result.get("last_turn_usage")
+    if not isinstance(usage, dict):
+        usage = {}
 
-    # Final assistant row → output + reasoning (the reply we are decorating).
-    for msg in reversed(messages):
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            d = _decode("assistant", msg.get("token_count"))
-            out_tokens, reason_tokens = d["output"], d["reasoning"]
-            break
+    in_tokens = _int(usage.get("prompt_tokens"))
+    out_tokens = _int(usage.get("output_tokens") or usage.get("completion_tokens"))
+    reason_tokens = _int(usage.get("reasoning_tokens"))
+    cache_tokens = _int(usage.get("cache_read_tokens"))
 
-    # Nearest prompt-tail user/tool row carrying input → total_input + cache.
-    # (First-turn user rows can be NULL under the best-effort write path, so
-    # scan back for the most recent row that actually carries input data.)
-    for msg in reversed(messages):
-        if isinstance(msg, dict) and msg.get("role") in ("user", "tool"):
-            d = _decode(msg.get("role"), msg.get("token_count"))
-            if d["input"] or d["cache_read"]:
-                in_tokens, cache_tokens = d["input"], d["cache_read"]
-                break
-
-    # Fallback for input when no prompt row carried it (e.g. NULL first-turn
-    # user row): the agent reports the prompt size as last_prompt_tokens.
+    # Turns that never reached a provider response carry ``last_turn_usage=None``
+    # by contract; the agent still reports the prompt size it measured.
     if not in_tokens:
-        try:
-            in_tokens = int(agent_result.get("last_prompt_tokens") or 0)
-        except (TypeError, ValueError):
-            in_tokens = 0
+        in_tokens = _int(agent_result.get("last_prompt_tokens"))
 
     if not (out_tokens or reason_tokens or in_tokens or cache_tokens):
         return ""

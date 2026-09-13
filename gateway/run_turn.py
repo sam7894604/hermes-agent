@@ -2052,6 +2052,18 @@ class GatewayTurnMixin:
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
+            # Per-reply token breakdown - gated by the /tokens toggle (per-session
+            # override or the global preference). Skipped when streaming already
+            # delivered the body. Never fails the turn.
+            if response and not agent_result.get("already_sent") and not _intentional_silence:
+                try:
+                    if self._tokens_enabled_for(source.platform, source.chat_id):
+                        from gateway.token_footer import build_token_line
+                        _tok_line = build_token_line(agent_result)
+                        if _tok_line:
+                            response = f"{response}\n\n{_tok_line}"
+                except Exception as _tok_err:
+                    logger.debug("token footer build failed: %s", _tok_err)
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (

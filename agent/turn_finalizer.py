@@ -541,6 +541,13 @@ def finalize_turn(
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 
+    # This turn's final API call as the provider reported it (the canonical usage
+    # dict from agent.turn_usage.record_response_usage). ``None`` on turns that
+    # never reached a provider response, by the same contract the context-engine
+    # hook above relies on. The /tokens reply footer reads this rather than
+    # re-deriving per-message counts.
+    _last_turn_usage = getattr(agent, "_last_turn_usage", None)
+
     result = {
         "final_response": final_response,
         "last_reasoning": _last_turn_reasoning(messages),
@@ -558,6 +565,7 @@ def finalize_turn(
         "provider": agent.provider,
         "base_url": agent.base_url,
         **{key: getattr(agent, f"session_{key}") for key in _SESSION_TOKEN_KEYS},
+        "last_turn_usage": dict(_last_turn_usage) if isinstance(_last_turn_usage, dict) else None,
         # Gateway SessionEntry persists an API reading, never the preflight display seed.
         "last_prompt_tokens": (
             getattr(agent.context_compressor, "last_real_prompt_tokens", agent.context_compressor.last_prompt_tokens)
