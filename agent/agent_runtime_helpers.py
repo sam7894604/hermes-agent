@@ -2188,41 +2188,6 @@ def switch_model(
         _restore_switch_snapshot(agent, snapshot)
         raise
 
-    # ── Split session when model changes ──
-    # Only split if the model actually changed (provider key rotation with the
-    # same model should not create a new session row).
-    _old_m = (old_model or '').strip().lower()
-    _new_m = (new_model or '').strip().lower()
-    if _old_m != _new_m:
-        _session_db = getattr(agent, '_session_db', None)
-        _old_sess_id = getattr(agent, 'session_id', None)
-        if _session_db is not None and _old_sess_id:
-            import uuid
-            _new_sess_id = f"{_old_sess_id.split('_')[0]}_{uuid.uuid4().hex[:8]}"
-            try:
-                _session_db.split_session(
-                    _old_sess_id,
-                    _new_sess_id,
-                    model=new_model,
-                    billing_provider=new_provider,
-                    billing_base_url=agent.base_url,
-                    billing_mode=getattr(agent, 'api_mode', None),
-                    source=getattr(agent, 'platform', None),
-                    user_id=getattr(agent, 'user_id', None),
-                    cwd=getattr(agent, 'cwd', None),
-                )
-                agent.session_id = _new_sess_id
-                agent._transition_context_engine_session(
-                    old_session_id=_old_sess_id,
-                    new_session_id=_new_sess_id,
-                    carry_over_context=True,
-                )
-            except Exception as _split_exc:
-                logger.warning(
-                    "Session split on model switch failed (non-fatal): %s",
-                    _split_exc,
-                )
-    # ──────────────────────────────────────────────
 
     custom_providers, effective_context_length = _resolve_switch_context_length(agent, snapshot)
     # Refresh the custom-provider snapshot from the config just loaded so the prompt_caching lookup
