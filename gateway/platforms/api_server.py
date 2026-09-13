@@ -2727,7 +2727,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name",
             "timestamp", "token_count", "finish_reason", "reasoning", "reasoning_content",
             "display_kind")
-        return {key: message.get(key) for key in safe_keys if key in message}
+        payload = {key: message.get(key) for key in safe_keys if key in message}
+        # Legacy rows: a fork build once bit-packed per-message counts into this column as
+        # NEGATIVE integers. That encoding is gone, but historical rows in a long-lived
+        # state.db still carry those values, and a negative token count is not a number any
+        # client should render. Report unknown instead. Nothing writes negatives now, so
+        # this only ever fires on pre-existing data.
+        if isinstance(payload.get("token_count"), int) and payload["token_count"] < 0:
+            payload["token_count"] = None
+        return payload
 
     async def _read_json_body(self, request: "web.Request") -> tuple[Dict[str, Any], Optional["web.Response"]]:
         try:
