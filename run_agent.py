@@ -111,7 +111,10 @@ from agent.status_output import StatusOutputMixin
 from agent.api_request_hooks import ApiRequestHooksMixin
 from agent.api_error_summary import ApiErrorSummaryMixin
 from agent.interrupt_control import InterruptControlMixin
-from agent.turn_explainers import TurnExplainersMixin
+from agent.turn_explainers import (
+    TurnExplainersMixin,
+    _VAULT_MUTATING_MCP_TOOLS,  # noqa: F401  # re-exported for `from run_agent import _VAULT_MUTATING_MCP_TOOLS`
+)
 from agent.activity_tracking import ActivityTrackingMixin
 from agent.rate_limit_credits import RateLimitCreditsMixin
 from agent.session_persistence import SessionPersistenceMixin
