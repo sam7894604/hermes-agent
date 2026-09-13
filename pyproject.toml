@@ -562,9 +562,6 @@ youtube-transcript-api = false
 # source tree (see the ``_root_py_modules`` helper there). A static
 # ``py-modules`` list here drifted from the tree each time the layout changed,
 # and the drift broke installed wheels. Do not add the list back.
-# NOTE(SinyiLiou): verified setup.py's _root_py_modules() lists every root-level
-# *.py file (except setup.py itself) dynamically, so hermes_token_codec.py ships
-# as a top-level py-module automatically — no static entry needed here anymore.
 
 [tool.setuptools.packages.find]
 include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]

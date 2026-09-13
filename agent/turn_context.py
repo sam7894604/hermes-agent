@@ -1103,15 +1103,6 @@ def build_api_messages(
         # Strip length-continuation marks; some transports keep underscore keys.
         api_msg.pop("_length_continuation_fragment", None)
         api_msg.pop("_length_continuation_nudge", None)
-        # Strip bit-packed per-message token accounting. token_count is an
-        # internal column (stored NEGATIVE for packed rows — see
-        # hermes_token_codec); it must never reach a provider payload,
-        # where it is an unknown field strict APIs reject.
-        api_msg.pop("token_count", None)
-        # Strip the flattened token view too — get_messages_as_conversation
-        # attaches `tokens` for display consumers, but it must not ride
-        # along into a provider payload.
-        api_msg.pop("tokens", None)
         # Strip Codex Responses fields (call_id, response_item_id): strict providers
         # reject unknown fields. New dicts keep the internal list intact for Codex.
         if agent._should_sanitize_tool_calls():

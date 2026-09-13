@@ -415,9 +415,8 @@ const COMPACT_NUMBER = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1
 export const fmtK = (n: number) => COMPACT_NUMBER.format(n).replace(/[KMBT]$/, s => s.toLowerCase())
 
 /**
- * Human-friendly token magnitude for the /tokens footer — mirrors the backend
- * hermes_token_codec.format_token_count: <1000 exact, 1000..<1e6 → K
- * (1.52K/23.5K/123K), >=1e6 → M (1.23M/12.5M).
+ * Human-friendly token magnitude for the /tokens footer: <1000 exact,
+ * 1000..<1e6 → K (1.52K/23.5K/123K), >=1e6 → M (1.23M/12.5M).
  */
 export function formatTokenCount(n: number): string {
   const v = Math.max(0, Math.trunc(Number.isFinite(n) ? n : 0))
