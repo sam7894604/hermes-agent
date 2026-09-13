@@ -113,7 +113,7 @@ _TELEGRAM_MENU_PRIORITY = (
     "help", "new", "stop", "status", "egress", "resume", "sessions", "model",
     "debug", "restart", "update", "verbose", "commands",
     "approve", "deny", "queue", "steer", "bg", "btw",
-    "reasoning", "usage", "platforms", "platform", "profile", "whoami")
+    "reasoning", "usage", "tokens", "platforms", "platform", "profile", "whoami")
 
 
 def _telegram_command_menu_config() -> dict[str, Any]:
