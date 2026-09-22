@@ -103,8 +103,11 @@ def _transcribe_groq(
     """Transcribe via the Groq Whisper API; language: hook > ``stt.groq.language`` > ``stt.language`` > env > auto."""
     from tools import transcription_common as _stt_common
     from tools.transcription_tools import (
-        _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language, get_env_value,
+        _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language,
     )
+    # Upstream dropped the tools.transcription_tools.get_env_value wrapper; read the
+    # CF token from its canonical home, as the xAI/ElevenLabs paths below already do.
+    from hermes_cli.config import get_env_value
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
     # Read the module attribute at call time, from its canonical home (the
     # tools.transcription_tools re-export is a compat shim scheduled for removal),
