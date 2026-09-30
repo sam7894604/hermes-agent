@@ -3935,7 +3935,7 @@ class GatewayRunner(
         """
         self._tokens_display_global = False
         try:
-            data = json.loads(self._TOKENS_DISPLAY_PATH.read_text())
+            data = json.loads(self._TOKENS_DISPLAY_PATH.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
         if not isinstance(data, dict):
@@ -3961,7 +3961,8 @@ class GatewayRunner(
                         "chats": self._tokens_display,
                     },
                     indent=2,
-                )
+                ),
+                encoding="utf-8",
             )
         except OSError as e:
             logger.warning("Failed to save tokens display state: %s", e)
