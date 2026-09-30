@@ -110,6 +110,7 @@
   "/tasks": null,
   "/timestamps": null,
   "/title": null,
+  "/tokens": null,
   "/tools": null,
   "/toolsets": "terminal",
   "/topic": null,
