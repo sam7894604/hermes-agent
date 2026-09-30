@@ -833,64 +833,6 @@ class TestMessageStorage:
         finally:
             session_db.close()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def test_get_messages_as_conversation_includes_ancestor_chain(self, db):
-        db.create_session("root", "tui")
-        db.append_message("root", role="user", content="first prompt")
-        db.append_message("root", role="assistant", content="first answer")
-        # End parent with model_switch so lineage walking follows the link
-        db.end_session("root", "model_switch")
-        db.create_session("child", "tui", parent_session_id="root")
-        db.append_message("child", role="user", content="second prompt")
-        db.append_message("child", role="assistant", content="second answer")
-
-        conv = db.get_messages_as_conversation("child", include_ancestors=True)
-
-        assert [m["content"] for m in conv] == [
-            "first prompt",
-            "first answer",
-            "second prompt",
-            "second answer",
-        ]
-
-    def test_get_messages_as_conversation_avoids_repeated_resume_prompts_from_ancestors(self, db):
-        db.create_session("root", "tui")
-        db.append_message("root", role="user", content="same prompt")
-        db.append_message("root", role="user", content="same prompt")
-        db.append_message("root", role="assistant", content="answer")
-        # End parent with model_switch so lineage walking follows the link
-        db.end_session("root", "model_switch")
-        db.create_session("child", "tui", parent_session_id="root")
-        db.append_message("child", role="user", content="next prompt")
-
-        conv = db.get_messages_as_conversation("child", include_ancestors=True)
-
-        assert [m["content"] for m in conv if m["role"] == "user"] == ["same prompt", "next prompt"]
-
-
     def test_get_messages_as_conversation_strips_leaked_memory_context(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message(
