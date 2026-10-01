@@ -31,7 +31,6 @@ const buildUiState = (): UiState => ({
   sections: {},
   sessionTitle: '',
   showReasoning: false,
-  showTokens: false,
   sid: null,
   status: t('status.summoning'),
   statusBar: 'top',

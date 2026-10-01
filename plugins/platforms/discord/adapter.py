@@ -170,16 +170,6 @@ _NATIVE_SLASH_COMMAND_SPECS: tuple = (
 # Discord rejects the whole bulk sync (error 50035) when ONE description / parameter description /
 # Choice name exceeds 100 UTF-16 units, so every localized slot is cut at the cap.
 _DISCORD_APP_COMMAND_TEXT_LIMIT = 100
-# Fork-only native slash commands, same row shape as the table above but kept outside it: that
-# table's text slots must all be catalog keys (tests/gateway/test_platform_adapter_i18n.py), i.e. a
-# new key in every locales/*.yaml. Literals pass through ``t()`` unchanged (a miss returns the key).
-_FORK_NATIVE_SLASH_COMMAND_SPECS: tuple = (
-    ("tokens", "Toggle a per-message token breakdown on replies",
-     (("state", str, "", "on (this session), off, always (all chats), or status",
-       (("on — show token breakdown in this session", "on"), ("off — hide token breakdown (clears global)", "off"),
-        ("always — show in every conversation", "always"), ("status — show current setting", "status"))),),
-     "/tokens {state}", None),
-)
 
 
 def _default_voice_ack_phrases() -> list:
@@ -203,8 +193,7 @@ def _native_slash_commands() -> tuple:
         return _text(label) if "." in label else label
 
     out = []
-    for name, description_key, args, template, followup_key in (
-            *_NATIVE_SLASH_COMMAND_SPECS, *_FORK_NATIVE_SLASH_COMMAND_SPECS):
+    for name, description_key, args, template, followup_key in _NATIVE_SLASH_COMMAND_SPECS:
         localized_args = tuple(
             (arg_name, arg_type, default, _text(desc_key),
              tuple((_choice_label(lbl), val) for lbl, val in choices) if choices else None)

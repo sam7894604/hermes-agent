@@ -114,7 +114,7 @@ _TELEGRAM_MENU_PRIORITY = (
     "help", "new", "stop", "status", "egress", "resume", "sessions", "model",
     "debug", "restart", "update", "verbose", "commands",
     "approve", "deny", "queue", "steer", "bg", "btw",
-    "reasoning", "usage", "tokens", "platforms", "platform", "profile", "whoami")
+    "reasoning", "usage", "platforms", "platform", "profile", "whoami")
 
 
 def _telegram_command_menu_config() -> dict[str, Any]:
@@ -384,9 +384,6 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat",
     "refine", "review", "pause", "whoami", "platform", "insights", "login"})
-# Fork-only /tokens would tip the registry past the cap above and push ``usage`` out of the native
-# slashes (Telegram-parity test); on Slack it is reached as ``/hermes tokens``.
-_SLACK_VIA_HERMES_ONLY = _SLACK_VIA_HERMES_ONLY | {"tokens"}
 
 
 def _sanitize_slack_name(raw: str) -> str:

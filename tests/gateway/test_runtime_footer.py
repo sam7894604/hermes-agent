@@ -279,3 +279,40 @@ def test_format_footer_served_model_is_opt_in_and_skips_same_model():
     assert format_runtime_footer(
         model="gpt-5.4", context_tokens=0, context_length=None, cwd="/x",
         served_model=None, fields=["served_model"]) == ""
+
+
+# ---------------------------------------------------------------------------
+# tokens field (opt-in): the turn's final-call usage, formatted like the rest of Hermes
+# ---------------------------------------------------------------------------
+
+def _usage(prompt=0, output=0, reasoning=0, cache_read=0):
+    """The canonical shape ``agent.turn_usage.record_response_usage`` stashes on the turn result."""
+    return {"prompt_tokens": prompt, "completion_tokens": output, "total_tokens": prompt + output,
+            "input_tokens": max(0, prompt - cache_read), "output_tokens": output,
+            "cache_read_tokens": cache_read, "cache_write_tokens": 0, "reasoning_tokens": reasoning}
+
+
+def test_tokens_field_renders_turn_usage_with_the_shared_compact_magnitudes():
+    from agent.usage_pricing import format_token_count_compact as compact
+
+    usage = _usage(prompt=1520, output=234, reasoning=128, cache_read=890)
+    out = format_runtime_footer(model="openai/gpt-5.4", context_tokens=0, context_length=None,
+                                cwd="/tmp/wd", turn_usage=usage, fields=("model", "tokens"))
+    # Same magnitudes the CLI status bar and /usage print, so the two never disagree.
+    assert out == f"gpt-5.4 · in:{compact(1520)} out:{compact(234)} rsn:{compact(128)} cache:{compact(890)}"
+    assert "tokens" not in resolve_footer_config(None)["fields"]  # opt-in, never in the default set
+
+
+def test_tokens_field_falls_back_to_the_measured_prompt_and_skips_when_empty():
+    # A turn that never reached a provider response carries turn_usage=None by contract; the prompt
+    # size the agent measured (context_tokens) is still reported.
+    out = format_runtime_footer(model="openai/gpt-5.4", context_tokens=999, context_length=None,
+                                cwd="/tmp/wd", turn_usage=None, fields=("tokens",))
+    assert out == "in:999 out:0 rsn:0 cache:0"
+    # Nothing to show at all -> the field is skipped like any other field without data.
+    assert format_runtime_footer(model="m", context_tokens=0, context_length=None, cwd="/tmp/wd",
+                                 turn_usage=_usage(), fields=("tokens",)) == ""
+    # Garbage values never raise (footers are decoration, not accounting).
+    bad = {"prompt_tokens": "nope", "output_tokens": None, "reasoning_tokens": -5, "cache_read_tokens": 7}
+    assert format_runtime_footer(model="m", context_tokens=0, context_length=None, cwd="/tmp/wd",
+                                 turn_usage=bad, fields=("tokens",)) == "in:0 out:0 rsn:0 cache:7"

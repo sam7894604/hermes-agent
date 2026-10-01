@@ -2204,7 +2204,7 @@ display:
   spinner_token_flow: true # CLI only: append live cumulative turn tokens to the spinner timer
   runtime_footer:         # Gateway: append a runtime-context footer to final replies
     enabled: false
-    fields: ["model", "context_pct", "cwd"]
+    fields: ["model", "context_pct", "cwd"]   # opt-in extras: latency, served_model, tokens (per-turn in/out/rsn/cache)
   status_bar:             # CLI/TUI: choose which status-bar fields are visible
     fields: []            # empty = show the default set; see below
   file_mutation_verifier: true    # Append an advisory footer when write_file/patch calls failed this turn
@@ -2335,7 +2335,7 @@ Notes:
 
 ### Runtime-metadata footer (gateway only)
 
-When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, and current working directory. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
+When `display.runtime_footer.enabled: true`, Hermes appends a small runtime-context footer to the **final** message of each gateway turn. The current footer can show the model, context-window percentage, current working directory, and (opt-in via `fields`) the turn's token counts as `tokens` — `in:1.52K out:234 rsn:128 cache:890`, the final API call's provider-reported usage. Off by default; opt in per-gateway if your team wants every reply to include this provenance.
 
 ```yaml
 display:

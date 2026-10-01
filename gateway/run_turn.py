@@ -1641,7 +1641,7 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config, _platform_config_key, _terminal_scope_cwd
         try:
             from gateway.runtime_footer import build_footer_line as _bfl
-            footer = _bfl(
+            return _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
@@ -1649,19 +1649,11 @@ class GatewayTurnMixin:
                 cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
                 requested_model=agent_result.get("requested_model"),
                 served_model=agent_result.get("served_model"),
+                turn_usage=agent_result.get("last_turn_usage"),
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)
-            footer = ""
-        try:
-            if self._tokens_enabled_for(source.platform, source.chat_id):
-                from gateway.token_footer import build_token_line
-
-                tokens = build_token_line(agent_result)
-                return "\n\n".join(line for line in (footer, tokens) if line)
-        except Exception as exc:
-            logger.debug("token footer build failed: %s", exc)
-        return footer
+            return ""
 
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
@@ -2246,7 +2238,7 @@ class GatewayTurnMixin:
                 reply_expected=event.reply_expected,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
-            _footer_line = "" if _intentional_silence else self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
+            _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"

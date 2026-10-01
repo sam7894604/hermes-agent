@@ -297,42 +297,6 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'per-message token breakdown footer [on|off|always|status]',
-    name: 'tokens',
-    run: (arg, ctx) => {
-      const a = (arg || '').trim().toLowerCase()
-
-      if (a === '' || a === 'status') {
-        queueMicrotask(() => ctx.transcript.sys(`tokens ${ctx.ui.showTokens ? 'on' : 'off'}`))
-        return
-      }
-      // `always` persists to config (shows in every future session); `on` is
-      // session-only; `off` disables and clears the persisted preference.
-      if (a === 'always') {
-        patchUiState({ showTokens: true })
-        void ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'display.show_message_tokens', value: 'on' })
-          .then(() => ctx.transcript.sys('tokens always (saved)'))
-          .catch(() => ctx.transcript.sys('tokens on (this session); could not save preference'))
-        return
-      }
-      if (a === 'off') {
-        patchUiState({ showTokens: false })
-        void ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'display.show_message_tokens', value: 'off' })
-          .then(() => ctx.transcript.sys('tokens off (saved)'))
-          .catch(() => ctx.transcript.sys('tokens off (this session); could not save preference'))
-        return
-      }
-      if (a === 'on') {
-        patchUiState({ showTokens: true })
-        queueMicrotask(() => ctx.transcript.sys('tokens on (this session)'))
-        return
-      }
-
-      return ctx.transcript.sys('usage: /tokens [on|off|always|status]')
-    }
-  },
-
-  {
     aliases: ['detail'],
     help: 'control agent detail visibility (global or per-section)',
     name: 'details',

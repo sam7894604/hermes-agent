@@ -677,7 +677,7 @@ def finalize_turn(
     # This turn's final API call as the provider reported it (the canonical usage
     # dict from agent.turn_usage.record_response_usage). ``None`` on turns that
     # never reached a provider response, by the same contract the context-engine
-    # hook above relies on. The /tokens reply footer reads this rather than
+    # hook above relies on. The runtime footer's ``tokens`` field reads this rather than
     # re-deriving per-message counts.
     _last_turn_usage = getattr(agent, "_last_turn_usage", None)
 

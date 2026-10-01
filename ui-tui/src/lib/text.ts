@@ -421,24 +421,6 @@ export const clarifyAnswerText = (answer: string, multiSelect?: boolean) => {
 
 export const flat = (r: Record<string, string[]>) => Object.values(r).flat()
 
-/**
- * Human-friendly token magnitude for the /tokens footer: <1000 exact,
- * 1000..<1e6 → K (1.52K/23.5K/123K), >=1e6 → M (1.23M/12.5M).
- */
-export function formatTokenCount(n: number): string {
-  const v = Math.max(0, Math.trunc(Number.isFinite(n) ? n : 0))
-  if (v < 1000) return String(v)
-  for (const [threshold, suffix] of [[1_000_000, 'M'], [1_000, 'K']] as const) {
-    if (v >= threshold) {
-      const scaled = v / threshold
-      let text = scaled < 10 ? scaled.toFixed(2) : scaled < 100 ? scaled.toFixed(1) : scaled.toFixed(0)
-      if (text.includes('.')) text = text.replace(/0+$/, '').replace(/\.$/, '')
-      return `${text}${suffix}`
-    }
-  }
-  return String(v)
-}
-
 export const pick = <T>(a: T[]) => a[Math.floor(Math.random() * a.length)]!
 
 export const isPasteBackedText = (text: string) =>
