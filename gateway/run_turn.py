@@ -1641,7 +1641,7 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config, _platform_config_key, _terminal_scope_cwd
         try:
             from gateway.runtime_footer import build_footer_line as _bfl
-            return _bfl(
+            footer = _bfl(
                 user_config=_load_gateway_config(),
                 platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
@@ -1652,7 +1652,16 @@ class GatewayTurnMixin:
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)
-            return ""
+            footer = ""
+        try:
+            if self._tokens_enabled_for(source.platform, source.chat_id):
+                from gateway.token_footer import build_token_line
+
+                tokens = build_token_line(agent_result)
+                return "\n\n".join(line for line in (footer, tokens) if line)
+        except Exception as exc:
+            logger.debug("token footer build failed: %s", exc)
+        return footer
 
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
@@ -2237,22 +2246,10 @@ class GatewayTurnMixin:
                 reply_expected=event.reply_expected,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
-            _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
+            _footer_line = "" if _intentional_silence else self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
-            # Per-reply token breakdown - gated by the /tokens toggle (per-session
-            # override or the global preference). Skipped when streaming already
-            # delivered the body. Never fails the turn.
-            if response and not agent_result.get("already_sent") and not _intentional_silence:
-                try:
-                    if self._tokens_enabled_for(source.platform, source.chat_id):
-                        from gateway.token_footer import build_token_line
-                        _tok_line = build_token_line(agent_result)
-                        if _tok_line:
-                            response = f"{response}\n\n{_tok_line}"
-                except Exception as _tok_err:
-                    logger.debug("token footer build failed: %s", _tok_err)
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (

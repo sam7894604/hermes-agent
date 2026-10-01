@@ -82,6 +82,18 @@ def test_status_reports_both(runner):
     assert "global" in out.lower() and "on" in out.lower()
 
 
+def test_token_footer_uses_shared_streaming_delivery_lane(runner, monkeypatch):
+    import gateway.run as run
+    from gateway.token_footer import build_token_line
+
+    monkeypatch.setattr(run, "_load_gateway_config", lambda: {})
+    _run(runner, "/tokens on")
+    source = _event("").source
+    result = {"already_sent": True, "last_turn_usage": {"prompt_tokens": 123, "completion_tokens": 45}}
+    assert runner._hmwa_runtime_footer_line(result, source, 1) == build_token_line(result)
+    assert runner._hmwa_runtime_footer_line(result, _event("", chat_id="999").source, 1) == ""
+
+
 def test_persistence_roundtrip_and_migration(runner):
     _run(runner, "/tokens always")
     _run(runner, "/tokens on")
