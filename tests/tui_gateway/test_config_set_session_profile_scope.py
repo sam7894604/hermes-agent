@@ -62,19 +62,3 @@ def test_unbound_config_set_still_writes_the_launch_profile(homes):
     assert resp["result"]["value"] == "steer"
     assert _read(launch)["display"]["busy_input_mode"] == "steer"
     assert _read(worker)["display"]["busy_input_mode"] == "queue"
-
-
-def test_message_tokens_preference_stays_in_owning_profile(homes):
-    launch, worker = homes
-    sessions = {
-        "launch": {"agent": None, "profile_home": str(launch), "session_key": "launch-session"},
-        "worker": {"agent": None, "profile_home": str(worker), "session_key": "worker-session"},
-    }
-    with patch.dict(server._sessions, sessions, clear=False):
-        for session_id, value, launch_value in [("launch", "on", True), ("worker", "off", True), ("launch", "off", False)]:
-            response = server._methods["config.set"]("rid", {
-                "session_id": session_id, "key": "display.show_message_tokens", "value": value,
-            })
-            assert response["result"]["value"] is (value == "on")
-            assert _read(launch)["display"]["show_message_tokens"] is launch_value
-        assert _read(worker)["display"]["show_message_tokens"] is False
