@@ -97,4 +97,3 @@ class GatewayTokensDisplayMixin:
         if key in self._tokens_display:
             return self._tokens_display[key]
         return bool(getattr(self, "_tokens_display_global", False))
-

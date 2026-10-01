@@ -203,4 +203,3 @@ class GatewayDocumentExtractMixin:
             f"[Auto-read scanned PDF '{display_name}'{extra} via vision:]\n"
             + "\n\n".join(pages)
         )
-
