@@ -49,7 +49,17 @@ class GatewayDocumentExtractMixin:
         try:
             # PDF (magic bytes also catch a legacy ".bin" whose name was lost).
             if head == b"%PDF-" or ext == ".pdf" or mtype == "application/pdf":
-                return await self._auto_extract_pdf(real_path, display_name)
+                extracted = await self._auto_extract_pdf(real_path, display_name)
+                if extracted:
+                    return extracted
+                from tools.read_extract import extract_document_bytes
+
+                # Legacy attachment caches may have lost the PDF extension.
+                with open(real_path, "rb") as pdf_file:
+                    pdf_bytes = pdf_file.read()
+                pdf_name = display_name if display_name.lower().endswith(".pdf") else display_name + ".pdf"
+                body = await asyncio.to_thread(extract_document_bytes, pdf_bytes, pdf_name)
+                return _wrap("document text", body)
 
             _TEXT_EXT = {
                 ".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml",

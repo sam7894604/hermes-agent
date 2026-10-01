@@ -15,7 +15,7 @@ import asyncio
 import sys
 import types
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -164,24 +164,37 @@ def test_doc_csv_inlined(tmp_path):
 
 
 def test_doc_docx_inlined(tmp_path):
-    import docx
-    d = docx.Document()
-    d.add_paragraph("Aryaduta Bali")
-    d.add_paragraph("Total USD 336.35")
+    from zipfile import ZipFile
     p = tmp_path / "receipt.docx"
-    d.save(str(p))
+    with ZipFile(p, "w") as archive:
+        archive.writestr("word/document.xml", '''
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body><w:p><w:r><w:t>Aryaduta Bali</w:t></w:r></w:p>
+              <w:p><w:r><w:t>Total USD 336.35</w:t></w:r></w:p></w:body>
+            </w:document>''')
     r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "receipt.docx"))
     assert r and "document text" in r and "Aryaduta Bali" in r and "336.35" in r
 
 
 def test_doc_xlsx_inlined(tmp_path):
-    import openpyxl
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append(["hotel", "amount"])
-    ws.append(["Aryaduta Bali", 336.35])
+    from zipfile import ZipFile
     p = tmp_path / "receipt.xlsx"
-    wb.save(str(p))
+    with ZipFile(p, "w") as archive:
+        archive.writestr("xl/workbook.xml", '''
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets><sheet name="Receipt" sheetId="1" r:id="rId1"/></sheets>
+            </workbook>''')
+        archive.writestr("xl/_rels/workbook.xml.rels", '''
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Target="worksheets/sheet1.xml"
+                Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"/>
+            </Relationships>''')
+        archive.writestr("xl/worksheets/sheet1.xml", '''
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Aryaduta Bali</t></is></c>
+              <c r="B1"><v>336.35</v></c></row></sheetData>
+            </worksheet>''')
     r = asyncio.run(GatewayRunner._auto_extract_document(_Self(), str(p), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "receipt.xlsx"))
     assert r and "document text" in r and "Aryaduta Bali" in r and "336.35" in r
 
@@ -253,3 +266,22 @@ def test_doc_pdf_delegates(tmp_path, monkeypatch):
     s._auto_extract_pdf = GatewayRunner._auto_extract_pdf.__get__(s, _Self)  # real PDF branch
     r = asyncio.run(GatewayRunner._auto_extract_document(s, str(p), "application/pdf", "r.pdf"))
     assert r and "Aryaduta Bali" in r
+
+
+def test_pdf_without_pymupdf_uses_upstream_extractor(tmp_path, monkeypatch):
+    import tools.read_extract as rx
+
+    path = tmp_path / "legacy.bin"
+    content = b"%PDF-1.4\nreceipt payload"
+    path.write_bytes(content)
+    monkeypatch.setitem(sys.modules, "pymupdf", None)
+    extract = Mock(
+        return_value="Aryaduta Bali USD 336.35"
+    )
+    monkeypatch.setattr(rx, "extract_document_bytes", extract)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    result = asyncio.run(runner._auto_extract_document(
+        str(path), "application/pdf", "receipt.pdf"
+    ))
+    assert result and "Aryaduta Bali USD 336.35" in result
+    extract.assert_called_once_with(content, "receipt.pdf")
