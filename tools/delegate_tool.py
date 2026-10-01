@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 
 # The delegate_tool_* siblings hold the pieces split out of this module; every name callers or patching tests reach as
 # ``tools.delegate_tool.<name>`` is re-imported here. Mutable flag globals live only in their owning module.
-# NOTE(SinyiLiou): DELEGATE_BLOCKED_TOOLS (with our custom "line_whitelist" entry — no self-approving
-# access-control changes by subagents) now lives in tools.delegate_tool_toolsets; "line_whitelist" must
-# be re-added there.
 from tools.delegate_tool_child_run import (  # noqa: F401
     _ChildRun, _attach_child, _build_child_goal_message, _build_result_entry, _dump_subagent_timeout_diagnostic, _fabricated_entry,
     _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat, _validate_child_output_schema,

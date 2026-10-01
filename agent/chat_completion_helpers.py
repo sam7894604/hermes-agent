@@ -1758,7 +1758,6 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
 
     if assistant_tool_calls:
         msg["tool_calls"] = [_assistant_tool_call_dict(agent, tc, i) for i, tc in enumerate(assistant_tool_calls)]
-
     return msg
 
 
@@ -2190,7 +2189,6 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None, reset_a
             from agent.native_compaction import resolve_native_compaction_capabilities
             agent.runtime_capabilities = resolve_native_compaction_capabilities(
                 model=agent.model, base_url=agent.base_url, provider=fb_provider, is_codex_backend=fb_provider == "openai-codex")
-
             return True
         except Exception as e:
             if fb_provider == "nous":

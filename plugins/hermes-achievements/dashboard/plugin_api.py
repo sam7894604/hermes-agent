@@ -384,8 +384,7 @@ def analyze_messages(session_id: str, title: str, messages: List[Dict[str, Any]]
         "screenshot_events": hits(r"screenshot|playwright|vision_analyze|browser_vision|\.png|image data"),
         "release_events": hits(r"\bgit\s+tag|release|version bump|changelog|publish|pushed? tag"),
         "cache_events": hits(r"cache hit|prompt caching|cache_read"),
-        "model_names": set(),
-    }
+        "model_names": set()}
 
 
 # ---- Evaluation ----

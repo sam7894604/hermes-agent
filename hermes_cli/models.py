@@ -144,10 +144,6 @@ def _custom_provider_ssl_context(base_url: str):
 
 
 # Process-lifetime picker lists refreshed from the live catalogs (see fetch_*_models).
-# NOTE(SinyiLiou): the static OPENROUTER_MODELS fallback (formerly defined here, with our
-# custom ("openrouter/owl-alpha", "free") entry) moved to hermes_cli.models_catalog_static
-# as part of upstream's file-split refactor; OPENROUTER_MODELS is now imported from there
-# (see top-of-file import). owl-alpha must be re-added in that sibling file instead.
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
 
 # The in-memory ``_openrouter_catalog_cache`` is per-process, so without a disk cache every cold

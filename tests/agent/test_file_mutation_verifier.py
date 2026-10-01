@@ -326,7 +326,7 @@ class TestVerifierEnabled:
 # ---------------------------------------------------------------------------
 
 
-from run_agent import _VAULT_MUTATING_MCP_TOOLS  # noqa: E402
+from agent.turn_explainers import _VAULT_MUTATING_MCP_TOOLS  # noqa: E402
 
 
 def _turn_agent() -> AIAgent:

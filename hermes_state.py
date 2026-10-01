@@ -1625,20 +1625,6 @@ class SessionDB(
     # lock.
     # ══════════════════════════════════════════════════════════════════════
 
-    def _execute_read(self, fn: Callable[[sqlite3.Connection], T]) -> T:
-        """Execute a read operation on the shared connection.
-
-        No transaction — pure read, no retry. Retained for fork callers that
-        need the WRITER connection specifically; prefer `_read_one`/`_read_all`.
-        """
-        with self._lock:
-            return fn(self._conn)
-
-    def _get_session(self, session_id: str):
-        """Read a single session row by id. Returns dict or None."""
-        row = self._read_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
-        return dict(row) if row else None
-
     def get_session_cost_aggregates(self, since_ts: float) -> List[Dict[str, Any]]:
         """Per-(model, provider, base_url) token sums for sessions in a window.
 
