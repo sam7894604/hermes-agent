@@ -263,6 +263,33 @@ class TestRouting:
 
 @pytest.mark.asyncio
 class TestObserveAndQuote:
+    async def test_observed_context_reaches_trigger_with_per_user_sessions(self, tmp_path, monkeypatch):
+        from gateway.config import GatewayConfig
+        from gateway.session import SessionStore
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        ad = _make_adapter()
+        store = SessionStore(tmp_path / "sessions", GatewayConfig(group_sessions_per_user=True))
+        ad._session_store = store
+        try:
+            source = {"type": "group", "groupId": "Cok", "userId": "Alice"}
+            await ad._handle_message_event(_msg_event(source, {
+                "type": "text", "id": "passive", "text": "receipt total 336.35",
+            }), authorized=True)
+            ad.handle_message.assert_not_awaited()
+            await ad._handle_message_event(_msg_event({**source, "userId": "Bob"}, {
+                "type": "text", "id": "trigger", "text": "@bot summarize receipt",
+                "mention": {"mentionees": [{"isSelf": True}]},
+            }), authorized=True)
+            event = ad.handle_message.await_args.args[0]
+            assert event.source.user_id == "Bob"
+            assert "receipt total 336.35" in (event.channel_context or "")
+            assert "not requests" in event.channel_context
+            assert "receipt total 336.35" not in event.text
+        finally:
+            if store._db:
+                store._db.close()
+
     def _store_with_session(self, messages=None):
         store = MagicMock()
         store.get_or_create_session.return_value = MagicMock(session_id="sid")
