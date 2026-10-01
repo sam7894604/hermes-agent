@@ -21,11 +21,42 @@ from hermes_cli.web_models import RawConfigUpdate
 
 router = APIRouter()
 
+_COST_WINDOWS = {"1h": 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400}
+
 # Late-bound so a test's monkeypatch on the owning module wins at call time.
 _open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.web_server_sessions")
 _session_db_path_for_profile = late("_session_db_path_for_profile", "hermes_cli.web_server_sessions")
 _profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
 save_config = late("save_config", "hermes_cli.config")
+
+
+@router.get("/api/analytics/cost-estimate")
+async def get_cost_estimate(
+    window: str = Query("24h", pattern="^(1h|24h|7d|30d)$"),
+    profile: Optional[str] = None,
+):
+    """Serve the cost card through the dashboard's authenticated profile routing."""
+    from agent.analytics import compute_cost_estimate
+    from agent.usage_pricing import get_pricing_entry
+
+    def _run():
+        with _profile_scope(profile):
+            db = _open_session_db_for_profile(profile, read_only=True)
+            try:
+                now = time.time()
+                seconds = _COST_WINDOWS[window]
+                groups = db.get_session_cost_aggregates(now - seconds)
+
+                def lookup(model, provider, base_url):
+                    return get_pricing_entry(model, provider=provider, base_url=base_url) if model else None
+
+                return {"window": window, "generated_at": now,
+                        **compute_cost_estimate(groups, seconds, lookup)}
+            finally:
+                db.close()
+
+    with corrupt_store_as_status(_session_db_path_for_profile(profile)):
+        return await asyncio.to_thread(_run)
 
 # ── Raw YAML config ──────────────────────────────────────────────────────────
 
