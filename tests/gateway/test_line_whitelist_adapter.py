@@ -336,7 +336,11 @@ class TestObserveAndQuote:
         await ad._handle_message_event(_msg_event(src, msg), authorized=True)
         ad.handle_message.assert_awaited_once()
         event_obj = ad.handle_message.await_args.args[0]
-        assert "receipt $12" in event_obj.text
+        assert "receipt $12" in event_obj.reply_to_text
+        assert event_obj.reply_to_message_id == "orig"
+        from gateway.run import GatewayRunner
+        prompt = GatewayRunner._prepend_inbound_reply_context(event_obj, event_obj.source, event_obj.text)
+        assert prompt.count("receipt $12") == 1
         assert "log this" in event_obj.text
 
     async def test_quote_missing_degrades(self):
@@ -347,7 +351,8 @@ class TestObserveAndQuote:
         await ad._handle_message_event(_msg_event(src, msg), authorized=True)
         ad.handle_message.assert_awaited_once()
         event_obj = ad.handle_message.await_args.args[0]
-        assert "earlier message" in event_obj.text.lower()
+        assert "earlier message" in event_obj.reply_to_text.lower()
+        assert event_obj.reply_to_message_id == "gone"
 
 
 # ---------------------------------------------------------------------------

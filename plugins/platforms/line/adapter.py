@@ -884,11 +884,9 @@ class LineAdapter(BasePlatformAdapter):
                 part for part in (observed_context, backfill_context) if part
             ) or None
 
-        # Quote reply (§8): if this message quotes an earlier one, look the
-        # original up in the transcript and prepend it as context.
+        # Let the gateway's shared reply-context path render the resolved quote.
         quote_ctx = await self._quote_context(source, chat_id, chat_type, msg)
-        if quote_ctx:
-            text = f"{quote_ctx}\n\n{text}" if text else quote_ctx
+        quoted_id = str(msg.get("quotedMessageId") or "") or None
 
         # Best-effort typing indicator (DM only).
         if chat_type == "dm" and self._client:
@@ -915,6 +913,11 @@ class LineAdapter(BasePlatformAdapter):
             message_id=message_id,
             media_urls=media_urls,
             media_types=media_types,
+            reply_to_message_id=quoted_id,
+            reply_to_text=quote_ctx,
+            reply_to_is_own_message=bool(
+                quoted_id and self._client and quoted_id in self._client.sent_message_ids
+            ),
             # Deterministic media-backfill content (vision text for recent group
             # images + recent-uploads hint); gateway prepends it to this turn.
             channel_context=backfill_context,
