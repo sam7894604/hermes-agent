@@ -1,5 +1,5 @@
 """Tests for the LINE whitelist dashboard plugin backend
-(plugins/platforms/line/dashboard/plugin_api.py).
+(plugins/line-whitelist/dashboard/plugin_api.py).
 
 The plugin mounts as /api/plugins/line-whitelist/ inside the dashboard's
 FastAPI app; here we attach its router to a bare FastAPI instance so we can
@@ -182,7 +182,7 @@ def fake_store(monkeypatch):
 def _load_plugin_router():
     repo_root = Path(__file__).resolve().parents[2]
     plugin_file = (
-        repo_root / "plugins" / "platforms" / "line" / "dashboard" / "plugin_api.py"
+        repo_root / "plugins" / "line-whitelist" / "dashboard" / "plugin_api.py"
     )
     assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
     spec = importlib.util.spec_from_file_location(
@@ -676,3 +676,19 @@ def test_resolve_success_and_cache(client, monkeypatch):
     r2 = client.get(f"{API}/resolve", params={"type": "user", "id": "Ualice"})
     assert r2.json()["cached"] is True
     assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Discovery: the dashboard ships as a bundled plugin dir upstream's scanner already covers
+# ---------------------------------------------------------------------------
+
+def test_line_whitelist_dashboard_is_discovered_as_a_bundled_plugin(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_cli.web_server_dashboard import _discover_dashboard_plugins
+
+    found = [p for p in _discover_dashboard_plugins() if p.get("name") == "line-whitelist"]
+    assert len(found) == 1, found
+    entry = found[0]
+    assert entry.get("source") == "bundled"
+    # The backend the web server mounts at /api/plugins/line-whitelist/ travels with the dir.
+    assert entry["has_api"] and (Path(entry["_dir"]) / "plugin_api.py").is_file()
