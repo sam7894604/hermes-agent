@@ -2438,8 +2438,6 @@ def switch_model(
     except Exception:
         _restore_switch_snapshot(agent, snapshot)
         raise
-
-
     custom_providers, effective_context_length = _resolve_switch_context_length(agent, snapshot)
     # Refresh the custom-provider snapshot from the config just loaded so the prompt_caching lookup
     # sees flags added to config.yaml after session start.
