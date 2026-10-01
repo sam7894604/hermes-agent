@@ -54,6 +54,24 @@ class _Self:
     """Minimal stand-in for GatewayRunner (methods only touch self._vision_...)."""
 
 
+def test_inbound_extract_skips_content_already_inlined(tmp_path):
+    from types import SimpleNamespace
+
+    path = tmp_path / "notes.txt"
+    path.write_text("receipt amount 336.35", encoding="utf-8")
+    runner = GatewayRunner.__new__(GatewayRunner)
+    event = SimpleNamespace(
+        media_urls=[str(path)], media_types=["text/plain"],
+        media_text_inlined=[True],
+    )
+    original = "[Content of notes.txt]\nreceipt amount 336.35"
+    result = asyncio.run(runner._append_inbound_document_extracts(event, original))
+    assert result == original
+    event.media_text_inlined = [False]
+    result = asyncio.run(runner._append_inbound_document_extracts(event, "Read attachment"))
+    assert result.count("receipt amount 336.35") == 1
+
+
 def test_non_pdf_returns_none(tmp_path):
     p = tmp_path / "x.bin"
     p.write_bytes(b"NOT-A-PDF-HEADER........")

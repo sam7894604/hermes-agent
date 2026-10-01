@@ -1631,7 +1631,10 @@ class GatewayInboundMixin:
             return message_text
         import mimetypes as _mimetypes
 
+        inline_flags = getattr(event, "media_text_inlined", None) or []
         for i, path in enumerate(event.media_urls):
+            if i < len(inline_flags) and inline_flags[i] is True:
+                continue
             if any(f(event, i) for f in (_event_media_is_image, _event_media_is_audio, _event_media_is_video)):
                 continue
             mtype = event.media_types[i] if i < len(event.media_types) else ""
