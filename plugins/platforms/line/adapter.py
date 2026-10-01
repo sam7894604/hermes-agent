@@ -1216,13 +1216,14 @@ class LineAdapter(BasePlatformAdapter):
                 return hit
         try:
             downloaded = await self._download_media(
-                message_id, kind, file_name=file_name
+                message_id, kind, filename=file_name
             )
         except Exception:
             downloaded = None
-        if downloaded:
+        if downloaded and downloaded[0]:
             self._bf_cache_put(self._bf_download_cache, message_id, downloaded)
-        return downloaded
+            return downloaded
+        return None
 
     async def _bf_vision(self, message_id: str, path: str) -> Optional[str]:
         """Extract-once memoization: vision-read an image and cache the analysis

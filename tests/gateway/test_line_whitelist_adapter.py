@@ -354,6 +354,29 @@ class TestObservedMediaBackfill:
         assert "[image]" in appended["content"]
         assert appended["platform_message_id"] == "img1" and appended["observed"] is True
 
+    async def test_backfill_download_uses_real_media_contract(self, tmp_path, monkeypatch):
+        ad = _make_adapter()
+        ad._client = MagicMock()
+        ad._client.fetch_content = AsyncMock(return_value=b'payload')
+        target = tmp_path / 'receipt.pdf'
+        target.write_bytes(b'payload')
+        cache = AsyncMock(return_value=str(target))
+        monkeypatch.setattr(_line, 'cache_document_from_bytes_async', cache)
+
+        result = await ad._bf_download('file1', 'file', file_name='receipt.pdf')
+        assert result == (str(target), 'application/pdf')
+        cache.assert_awaited_once_with(b'payload', 'receipt.pdf')
+        assert await ad._bf_download('file1', 'file', file_name='receipt.pdf') == result
+        ad._client.fetch_content.assert_awaited_once_with('file1')
+
+    async def test_backfill_failed_download_can_retry(self):
+        ad = _make_adapter()
+        ad._client = MagicMock()
+        ad._client.fetch_content = AsyncMock(side_effect=OSError('unavailable'))
+        assert await ad._bf_download('file1', 'file') is None
+        assert await ad._bf_download('file1', 'file') is None
+        assert ad._client.fetch_content.await_count == 2
+
     async def test_backfill_image_vision_injected_as_context(self, monkeypatch):
         # An in-window observed image is vision-read and its analysis is injected
         # as channel_context text (NOT re-attached as media, to avoid re-billing
@@ -374,7 +397,7 @@ class TestObservedMediaBackfill:
         ctx, urls, types = await ad._backfill_recent_media("Cok", "group")
         assert urls == [] and types == []            # image goes to context, not media
         assert "150000" in ctx and "近期本群組上傳" in ctx
-        ad._download_media.assert_awaited_once_with("img99", "image", file_name="")
+        ad._download_media.assert_awaited_once_with("img99", "image", filename="")
 
     async def test_backfill_vision_is_cached_not_reextracted(self, monkeypatch):
         # Re-pulling the same image id in a later turn must NOT re-run vision.
@@ -407,7 +430,7 @@ class TestObservedMediaBackfill:
         ctx, urls, types = await ad._backfill_recent_media("Cok", "group")
         assert urls == ["/tmp/receipt.pdf"] and types == ["application/pdf"]
         assert "receipt.pdf" in ctx                    # named in the hint too
-        ad._download_media.assert_awaited_once_with("f7", "file", file_name="receipt.pdf")
+        ad._download_media.assert_awaited_once_with("f7", "file", filename="receipt.pdf")
 
     async def test_backfill_respects_window(self):
         import time
