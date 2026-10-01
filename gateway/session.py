@@ -496,7 +496,6 @@ class SessionEntry:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     cost_status: str = "unknown"
@@ -543,7 +542,7 @@ class SessionEntry:
     # ``data.get(name, <dataclass default>)``), split around the three ISO-datetime/token keys.
     _PLAIN_FIELDS = (
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-        "reasoning_tokens", "total_tokens", "last_prompt_tokens", "estimated_cost_usd", "cost_status",
+        "total_tokens", "last_prompt_tokens", "estimated_cost_usd", "cost_status",
         "expiry_finalized", "suspended", "resume_pending", "resume_reason",
     )
     _RESET_FIELDS = (

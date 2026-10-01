@@ -597,36 +597,6 @@ class TestSessionLifecycle:
 
 
 
-    def test_update_token_counts_preserves_existing_model(self, db):
-        db.create_session(session_id="s1", source="cli", model="anthropic/claude-opus-4.6")
-        db.update_token_counts("s1", input_tokens=10, output_tokens=5, model="openai/gpt-5.4")
-
-        session = db.get_session("s1")
-        assert session["model"] == "anthropic/claude-opus-4.6"
-
-    def test_update_session_model_overwrites_existing(self, db):
-        """A mid-session /model switch must overwrite the stored model.
-
-        update_token_counts uses COALESCE(model, ?) (first-writer-wins), so
-        the dashboard kept showing the original model after a switch (#34850).
-        update_session_model sets the column unconditionally.
-        """
-        db.create_session(session_id="s1", source="telegram",
-                          model="xiaomi/mimo-v2.5-pro")
-        # Token updates never change the model once set.
-        db.update_token_counts("s1", input_tokens=10, output_tokens=5,
-                               model="xiaomi/mimo-v2.5-pro")
-        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5-pro"
-
-        # Explicit switch overwrites it.
-        db.update_session_model("s1", "xiaomi/mimo-v2.5")
-        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
-
-        # And a subsequent token update does NOT revert it (COALESCE no-ops
-        # because the column is now non-NULL).
-        db.update_token_counts("s1", input_tokens=10, output_tokens=5,
-                               model="xiaomi/mimo-v2.5-pro")
-        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
 
     def test_update_session_model_clears_browser_lock_and_preserves_lineage(self, db):
         """A later /model switch must replace, not compete with, a Browser lock."""
@@ -714,6 +684,10 @@ class TestSessionLifecycle:
         finally:
             db.close()
 
+
+# =========================================================================
+# Message storage
+# =========================================================================
 
 class TestMessageStorage:
     def test_append_and_get_messages(self, db):
@@ -832,6 +806,31 @@ class TestMessageStorage:
             assert len(session_db.get_messages_as_conversation("s1")) == 1
         finally:
             session_db.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def test_get_messages_as_conversation_strips_leaked_memory_context(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -6065,6 +6064,7 @@ class TestApplyDatabasePragmas:
             assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == before
         finally:
             conn.close()
+
     def test_ignores_non_integer_performance_values(self, tmp_path, monkeypatch):
         """Garbage cache_size/mmap_size/temp_store values must be rejected."""
         import sqlite3

@@ -65,8 +65,3 @@ Or set the environment variable:
 ```
 DISCORD_AUTO_CHOICE_BUTTONS=false
 ```
-
-## Telegram
-
-The same prefix convention (`? ` / `?? `) is planned for the Telegram adapter
-and will share the detection logic via `auto_choice_utils.py`.

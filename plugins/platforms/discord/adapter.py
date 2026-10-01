@@ -4991,21 +4991,6 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return bool(configured)
         return os.getenv("DISCORD_AUTO_CHOICE_BUTTONS", "true").lower() not in {"false", "0", "no", "off"}
 
-    def _discord_allow_any_attachment(self) -> bool:
-        """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
-
-        When True, any uploaded file is cached to disk and surfaced to the
-        agent as a local path so it can be inspected via terminal / read_file
-        / ffprobe / etc. Default False preserves the historical behaviour of
-        dropping unsupported types with a warning log.
-        """
-        configured = self.config.extra.get("allow_any_attachment")
-        if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() not in {"false", "0", "no", "off", ""}
-            return bool(configured)
-        return os.getenv("DISCORD_ALLOW_ANY_ATTACHMENT", "false").lower() in {"true", "1", "yes", "on"}
-
     def _discord_require_mention(self) -> bool:
         """Return whether Discord channel messages require a bot mention."""
         return self._extra_or_env_flag("require_mention", "DISCORD_REQUIRE_MENTION", "true", truthy=False)

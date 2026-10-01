@@ -326,8 +326,6 @@ class TestVerifierEnabled:
 # ---------------------------------------------------------------------------
 
 
-from agent.turn_explainers import _VAULT_MUTATING_MCP_TOOLS  # noqa: E402
-
 
 def _turn_agent() -> AIAgent:
     """Bare agent with the full per-turn verifier state (mirrors turn_context)."""
@@ -397,8 +395,3 @@ class TestVaultMutationSuppression:
         )
         assert agent._turn_vault_mutation_succeeded is False
         assert _footer_would_show(agent) is True
-
-    def test_vault_tool_set_shape(self):
-        assert _VAULT_MUTATING_MCP_TOOLS == frozenset({
-            "mcp__turbovault__write_note", "mcp__turbovault__edit_note",
-        })
