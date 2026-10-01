@@ -310,14 +310,16 @@ export const coreCommands: SlashCommand[] = [
       // session-only; `off` disables and clears the persisted preference.
       if (a === 'always') {
         patchUiState({ showTokens: true })
-        ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'show_message_tokens', value: 'on' }).catch(() => {})
-        queueMicrotask(() => ctx.transcript.sys('tokens always (saved)'))
+        void ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'display.show_message_tokens', value: 'on' })
+          .then(() => ctx.transcript.sys('tokens always (saved)'))
+          .catch(() => ctx.transcript.sys('tokens on (this session); could not save preference'))
         return
       }
       if (a === 'off') {
         patchUiState({ showTokens: false })
-        ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'show_message_tokens', value: 'off' }).catch(() => {})
-        queueMicrotask(() => ctx.transcript.sys('tokens off'))
+        void ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'display.show_message_tokens', value: 'off' })
+          .then(() => ctx.transcript.sys('tokens off (saved)'))
+          .catch(() => ctx.transcript.sys('tokens off (this session); could not save preference'))
         return
       }
       if (a === 'on') {
