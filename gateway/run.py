@@ -2206,6 +2206,7 @@ from gateway.run_watchers import GatewaySessionWatchersMixin
 from gateway.run_notifications import GatewayNotificationsMixin
 from gateway.run_inbound import GatewayInboundMixin
 from gateway.run_document_extract import GatewayDocumentExtractMixin
+from gateway.run_tokens_display import GatewayTokensDisplayMixin
 from gateway.run_goals import GatewayGoalsMixin
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.run_profile_reconcile import GatewayProfileReconcileMixin
@@ -3381,7 +3382,7 @@ class GatewayRunner(
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
     GatewaySessionWatchersMixin, GatewayNotificationsMixin, GatewayInboundMixin, GatewayGoalsMixin,
     GatewayAgentCacheMixin, GatewayProfileReconcileMixin, GatewayPluginRewireMixin,
-    GatewayDocumentExtractMixin):
+    GatewayDocumentExtractMixin, GatewayTokensDisplayMixin):
     """Main gateway controller: manages adapter lifecycles, routes messages to/from the agent."""
 
     # Class-level defaults so partial construction in tests doesn't blow up on attribute access.
@@ -3920,61 +3921,6 @@ class GatewayRunner(
             "for container-local paths like '/workspace/...' or '/output/...'.")
 
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
-
-    _TOKENS_DISPLAY_PATH = _hermes_home / "gateway_tokens_display.json"
-
-    def _tokens_key(self, platform: Platform, chat_id: str) -> str:
-        """Platform-namespaced key for the per-session /tokens override."""
-        return f"{platform.value}:{chat_id}"
-
-    def _load_tokens_display(self) -> Dict[str, bool]:
-        """Load per-session overrides; also sets ``_tokens_display_global``.
-
-        Format: ``{"global": bool, "chats": {"<platform>:<chat>": bool}}``.
-        ``global`` is the ``/tokens always`` preference (all conversations);
-        ``chats`` are per-session ``on``/``off`` overrides that win over it.
-        A legacy flat ``{key: bool}`` file is migrated as per-session overrides.
-        """
-        self._tokens_display_global = False
-        try:
-            data = json.loads(self._TOKENS_DISPLAY_PATH.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        if "chats" in data or "global" in data:
-            self._tokens_display_global = bool(data.get("global", False))
-            chats = data.get("chats") or {}
-        else:
-            chats = data  # legacy flat format
-        return {
-            str(k): bool(v)
-            for k, v in chats.items()
-            if isinstance(k, str) and ":" in str(k)
-        }
-
-    def _save_tokens_display(self) -> None:
-        try:
-            self._TOKENS_DISPLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._TOKENS_DISPLAY_PATH.write_text(
-                json.dumps(
-                    {
-                        "global": bool(getattr(self, "_tokens_display_global", False)),
-                        "chats": self._tokens_display,
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            logger.warning("Failed to save tokens display state: %s", e)
-
-    def _tokens_enabled_for(self, platform: Platform, chat_id: str) -> bool:
-        """Effective /tokens state: a per-session override wins over global."""
-        key = self._tokens_key(platform, chat_id)
-        if key in self._tokens_display:
-            return self._tokens_display[key]
-        return bool(getattr(self, "_tokens_display_global", False))
 
     should_exit_cleanly = property(lambda self: self._exit_cleanly)
     should_exit_with_failure = property(lambda self: self._exit_with_failure)

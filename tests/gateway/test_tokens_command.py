@@ -108,3 +108,21 @@ def test_persistence_roundtrip_and_migration(runner):
     runner._TOKENS_DISPLAY_PATH.write_text(json.dumps({"telegram:5": True}))
     chats = runner._load_tokens_display()
     assert chats["telegram:5"] is True and runner._tokens_display_global is False
+
+
+def test_token_preferences_follow_profile_scope(tmp_path):
+    from gateway.run import GatewayRunner
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._tokens_display = {}
+    runner._tokens_display_global = False
+    for name, command, expected in [("A", "/tokens always", True), ("B", "/tokens off", False), ("A", "/tokens status", True)]:
+        token = set_hermes_home_override(tmp_path / name)
+        try:
+            _run(runner, command)
+            assert runner._tokens_enabled_for(_event("").source.platform, "123") is expected
+        finally:
+            reset_hermes_home_override(token)
+    assert json.loads((tmp_path / "A" / "gateway_tokens_display.json").read_text())["global"] is True
+    assert json.loads((tmp_path / "B" / "gateway_tokens_display.json").read_text())["global"] is False
