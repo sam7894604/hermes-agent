@@ -1,0 +1,13 @@
+{
+  "name": "cost-estimate",
+  "label": "Cost estimate",
+  "description": "Per-model cost over a 1h/24h/7d/30d window, priced per tier (input/output/cache) from each model's published pricing, with a daily/monthly projection. Falls back to the stored session estimate for models without known pricing.",
+  "icon": "Database",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/cost-estimate",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

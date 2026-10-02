@@ -24,7 +24,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@nous-research/ui/ui/c
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
-import RealtimeAnalytics from "@/components/RealtimeAnalytics";
 import { errorMessage } from "@/lib/api-error";
 
 const PERIODS = [
@@ -581,8 +580,6 @@ export default function AnalyticsPage() {
           <DailyTable daily={data.daily} />
           <ModelTable models={data.by_model} />
           <SkillTable skills={data.skills.top_skills} />
-
-          <RealtimeAnalytics />
         </>
       )}
 

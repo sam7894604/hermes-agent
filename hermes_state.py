@@ -1616,55 +1616,6 @@ class SessionDB(
         "absorbed_message_uids, tool_call_uids, tool_call_uid"
     )
 
-    # ══════════════════════════════════════════════════════════════════════
-    # fork extension layer
-    #
-    # Everything below is fork-only (no upstream counterpart). It lives in the
-    # SessionDB body rather than in one of upstream's extracted mixins so the
-    # next upstream merge touches zero mixin files. Reads go through upstream's
-    # pooled read path (_read_one / _read_all) instead of the pre-refactor
-    # `with self._lock: self._conn.execute(...)`, which now means the writer
-    # lock.
-    # ══════════════════════════════════════════════════════════════════════
-
-    def get_session_cost_aggregates(self, since_ts: float) -> List[Dict[str, Any]]:
-        """Per-(model, provider, base_url) token sums for sessions in a window.
-
-        Groups sessions whose activity (``COALESCE(ended_at, started_at)``) is
-        at/after ``since_ts`` and sums the session-level token columns plus the
-        stored ``estimated_cost_usd``. Feeds cost analytics (priced per tier
-        from the model). Returns a list of dicts; values are plain ints/floats.
-        """
-        rows = self._read_all(
-            "SELECT model, billing_provider, billing_base_url, "
-            "COUNT(*) AS sessions, "
-            "COALESCE(SUM(input_tokens),0) AS input_tokens, "
-            "COALESCE(SUM(output_tokens),0) AS output_tokens, "
-            "COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, "
-            "COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, "
-            "COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens, "
-            "COALESCE(SUM(estimated_cost_usd),0) AS estimated_cost_usd "
-            "FROM sessions "
-            "WHERE COALESCE(ended_at, started_at) >= ? "
-            "GROUP BY model, billing_provider, billing_base_url",
-            (since_ts,),
-        )
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            out.append({
-                "model": r["model"],
-                "billing_provider": r["billing_provider"],
-                "billing_base_url": r["billing_base_url"],
-                "sessions": int(r["sessions"] or 0),
-                "input_tokens": int(r["input_tokens"] or 0),
-                "output_tokens": int(r["output_tokens"] or 0),
-                "cache_read_tokens": int(r["cache_read_tokens"] or 0),
-                "cache_write_tokens": int(r["cache_write_tokens"] or 0),
-                "reasoning_tokens": int(r["reasoning_tokens"] or 0),
-                "estimated_cost_usd": float(r["estimated_cost_usd"] or 0.0),
-            })
-        return out
-
     # ── Meta key/value (scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:

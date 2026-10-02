@@ -599,10 +599,6 @@ export const api = {
     fetchJSON<ModelsAnalyticsResponse>(
       appendProfileParam(`/api/analytics/models?days=${days}`, profile),
     ),
-  getCostEstimate: (window: AnalyticsWindow, profile = getManagementProfile()) =>
-    fetchJSON<CostEstimateResponse>(
-      appendProfileParam(`/api/analytics/cost-estimate?window=${window}`, profile),
-    ),
   getConfig: (profile = getManagementProfile()) =>
     fetchJSON<Record<string, unknown>>(appendProfileParam("/api/config", profile)),
   getDefaults: () => fetchJSON<Record<string, unknown>>("/api/config/defaults"),
@@ -2343,29 +2339,6 @@ export interface AnalyticsResponse {
     summary: AnalyticsSkillsSummary;
     top_skills: AnalyticsSkillEntry[];
   };
-}
-
-// ── Cost analytics ─────────────────────────────────────────────────────────
-export type AnalyticsWindow = "1h" | "24h" | "7d" | "30d";
-
-export interface CostEstimateModel {
-  model: string | null;
-  provider: string | null;
-  sessions: number;
-  tokens: Record<string, number>;
-  cost_breakdown: Record<string, number | null>;
-  cost_usd: number;
-  cost_source: string;
-}
-
-export interface CostEstimateResponse {
-  window: AnalyticsWindow;
-  generated_at: number;
-  total_cost_usd: number;
-  cost_by_tier: { input: number; output: number; cache: number };
-  projection: { daily_usd: number; monthly_usd: number };
-  has_unpriced_models: boolean;
-  models: CostEstimateModel[];
 }
 
 export interface ActiveProfileInfo {
