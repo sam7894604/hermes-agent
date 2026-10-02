@@ -19,13 +19,14 @@ adapters without patching them.
 | `platforms/line` | platform override | subclass of the bundled LINE adapter: config-backed whitelist + admin notification, `requires_mention` gating (quote-reply of the bot counts), passive group context + on-demand media backfill, display names, tables→bullets, and the `line_whitelist` agent tool | `plugins/platforms/line/{adapter,whitelist_store,whitelist_notify}.py`, `tools/line_whitelist_tool.py`, `toolsets.py`, `tools_config.py`, `delegate_tool_toolsets.py`, metrics schema |
 | `platforms/discord` | platform override | subclass of the bundled Discord adapter: `? `/`?? ` auto-choice buttons after a reply, and the Approve/Ignore/Skip LINE whitelist card | `plugins/platforms/discord/adapter.py` (+ its README) |
 | `platforms/telegram` | platform override | subclass of the bundled Telegram adapter: the Approve/Ignore/Skip LINE whitelist card (`linewl:` callbacks) | `plugins/platforms/telegram/adapter.py` |
+| `tokens-footer` | hooks (`post_api_request` + `transform_llm_output`) | appends the turn's `in/out/rsn/cache` token counts to gateway replies when `tokens` is listed in `display.runtime_footer.fields` (the fork's former footer field; streamed turns get it through upstream's edit-in-place of transformed finals) | `gateway/runtime_footer.py`, `run_turn.py`, `agent/turn_finalizer.py` `tokens` field |
 | `groq-cf-stt` | transcription provider (`stt.provider: groq-cf`) | Groq Whisper through a Cloudflare AI Gateway: sends `cf-aig-authorization` from `CF_AIG_TOKEN` with an empty provider key (BYOK); direct `api.groq.com` behaves like the built-in `groq` backend | `tools/transcription_cloud.py` CF header hunk |
 
 ## Install on a host
 
 ```bash
 fork-plugins/install.sh            # symlinks every entry into $HERMES_HOME/plugins and prints the enable commands
-hermes plugins enable turbovault-fixups document-extract cost-estimate line-whitelist groq-cf-stt platforms/line platforms/discord platforms/telegram
+hermes plugins enable turbovault-fixups document-extract cost-estimate line-whitelist groq-cf-stt tokens-footer platforms/line platforms/discord platforms/telegram
 hermes plugins list                # every entry must show as loaded — an override that fails to import takes its platform DOWN, not degraded
 ```
 

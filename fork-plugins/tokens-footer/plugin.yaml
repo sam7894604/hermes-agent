@@ -1,0 +1,7 @@
+name: tokens-footer
+version: 1.0.0
+description: "Appends the turn's token counts (in/out/reasoning/cache of the final API call) to gateway replies when `tokens` is listed in display.runtime_footer.fields — the fork's former `tokens` footer field, as a plugin. post_api_request + transform_llm_output hooks; gateway-only."
+author: "Sam Liu"
+provides_hooks:
+  - post_api_request
+  - transform_llm_output
