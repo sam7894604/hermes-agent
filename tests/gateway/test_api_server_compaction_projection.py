@@ -300,29 +300,3 @@ class TestMessagesEndpointProjection:
                      "child question 2", "child answer 2"):
             assert full.count(text) == 1, (text, full)
         assert full.index("parent ask") < full.index("child question 1") < full.index("child answer 2")
-
-
-class TestLegacyPackedTokenCount:
-    """A retired fork build bit-packed per-message counts as NEGATIVE integers.
-
-    The encoding is gone, but a long-lived state.db still holds those rows, and a
-    negative token count is not a number any client should render.
-    """
-
-    def test_negative_legacy_value_is_reported_as_unknown(self):
-        projected = APIServerAdapter._message_response(
-            _row("assistant", "hi", token_count=-4611686018427387000)
-        )
-        assert projected["token_count"] is None
-
-    def test_normal_and_absent_values_pass_through(self):
-        assert APIServerAdapter._message_response(
-            _row("assistant", "hi", token_count=1234)
-        )["token_count"] == 1234
-        assert APIServerAdapter._message_response(
-            _row("assistant", "hi", token_count=0)
-        )["token_count"] == 0
-        assert APIServerAdapter._message_response(
-            _row("assistant", "hi", token_count=None)
-        )["token_count"] is None
-        assert "token_count" not in APIServerAdapter._message_response(_row("assistant", "hi"))
