@@ -33,19 +33,17 @@ never touch the shared ``_SUBSYSTEMS`` tuple). An admin later confirms with
 ``action="approve_pending"`` / ``action="list_pending"`` / ``action="reject"``.
 This is optional sugar on top of the MVP direct-approve path.
 
-Store interface (Phase 1, may not exist yet in this worktree)
--------------------------------------------------------------
-    from plugins.platforms.line.whitelist_store import (
-        WhitelistStore, WhitelistError,
-    )
+Store interface (``whitelist_store.py`` in this plugin)
+-------------------------------------------------------
+    from .whitelist_store import WhitelistStore, WhitelistError
     store.list(scope=None)                     -> list[dict]
     store.add(scope, id, added_by=, note=)     -> dict | None
     store.remove(scope, id)                    -> bool  (raises WhitelistError
                                                   when id is an admin)
     store.is_admin(user_id)                    -> bool
 
-The import is deferred (inside ``_get_store``) so this module imports cleanly
-even before Phase 1 lands, and so tests can monkeypatch the store factory.
+The import is deferred (inside ``_get_store``) so tests can monkeypatch the store
+factory. Registration happens in ``register_tool`` (called by the plugin's ``register``).
 """
 
 from __future__ import annotations
@@ -57,6 +55,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from tools.registry import tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +85,10 @@ def _get_store():
 
     Deferred import + thin factory so (a) this module imports even when the
     Phase-1 store isn't present yet, and (b) tests can monkeypatch
-    ``tools.line_whitelist_tool._get_store`` with a mock. The real store owns
+    ``line_whitelist_tool._get_store`` with a mock. The real store owns
     config.yaml read/write; we never touch config here directly.
     """
-    from plugins.platforms.line.whitelist_store import WhitelistStore
+    from .whitelist_store import WhitelistStore
     return WhitelistStore()
 
 
@@ -100,7 +100,7 @@ def _whitelist_error_cls():
     evaluation time.
     """
     try:
-        from plugins.platforms.line.whitelist_store import WhitelistError
+        from .whitelist_store import WhitelistError
         return WhitelistError
     except Exception:  # pragma: no cover - only when Phase 1 absent
         return Exception
@@ -218,6 +218,16 @@ def line_whitelist(
     See module docstring for the permission model. Returns a JSON string.
     """
     del task_id  # kept for handler-signature compatibility
+
+    # Never self-approve access-control changes from a delegated subagent. The static
+    # DELEGATE_BLOCKED_TOOLS list cannot name a plugin tool, so the refusal lives here:
+    # the child may see the tool in its schema but every call is rejected.
+    from agent.delegation_context import is_delegated_child_process_context
+    if is_delegated_child_process_context():
+        return tool_error(
+            "line_whitelist is not available to delegated subagents; ask the parent agent.",
+            success=False,
+        )
 
     normalized = (action or "").strip().lower()
     if normalized not in _VALID_ACTIONS:
@@ -431,19 +441,9 @@ def _refuse(what: str) -> str:
 # ---------------------------------------------------------------------------
 
 def check_line_whitelist_requirements() -> bool:
-    """Tool is available when the LINE platform plugin is importable.
-
-    Uses a cheap import probe on the Phase-1 store module; if LINE isn't
-    installed/configured, the tool is hidden rather than erroring at call time.
-    """
-    try:
-        import importlib.util
-        return (
-            importlib.util.find_spec("plugins.platforms.line.whitelist_store")
-            is not None
-        )
-    except Exception:
-        return False
+    """The store ships inside this plugin, so the tool is available whenever the plugin is
+    enabled; per-call admin gating happens in the handler."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -511,23 +511,28 @@ LINE_WHITELIST_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# Registry
+# Plugin registration
 # ---------------------------------------------------------------------------
 
-from tools.registry import registry, tool_error, tool_result
-
-registry.register(
-    name="line_whitelist",
-    toolset="line_whitelist",
-    schema=LINE_WHITELIST_SCHEMA,
-    handler=lambda args, **kw: line_whitelist(
+def _handle(args: Dict[str, Any], **kw: Any) -> str:
+    return line_whitelist(
         action=args.get("action", ""),
         scope=args.get("scope"),
         id=args.get("id"),
         note=args.get("note"),
         pending_id=args.get("pending_id"),
         task_id=kw.get("task_id"),
-    ),
-    check_fn=check_line_whitelist_requirements,
-    emoji="✅",
-)
+    )
+
+
+def register_tool(ctx) -> None:
+    """Register ``line_whitelist`` in its own ``line_whitelist`` toolset (a plugin toolset: list it in
+    ``platform_toolsets.<platform>`` or tick it in ``hermes tools`` for the platforms that need it)."""
+    ctx.register_tool(
+        name="line_whitelist",
+        toolset="line_whitelist",
+        schema=LINE_WHITELIST_SCHEMA,
+        handler=_handle,
+        check_fn=check_line_whitelist_requirements,
+        emoji="✅",
+    )

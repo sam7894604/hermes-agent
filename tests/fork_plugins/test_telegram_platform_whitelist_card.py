@@ -38,7 +38,10 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
+from tests.fork_plugins._plugin_loader import load_fork_plugin  # noqa: E402
+
+_telegram = load_fork_plugin("platforms/telegram").adapter
+TelegramAdapter = _telegram.TelegramAdapter
 from gateway.config import PlatformConfig  # noqa: E402
 
 
@@ -97,7 +100,7 @@ class TestSendWhitelistDecision:
         # Capture the InlineKeyboardButton callback_data values. Under the test
         # harness InlineKeyboardMarkup is a MagicMock, so inspect the button
         # constructor calls directly (real class isn't imported here).
-        import plugins.platforms.telegram.adapter as tg
+        tg = _telegram._base  # the override reads the keyboard classes off upstream at call time
         with patch.object(tg, "InlineKeyboardButton") as MockBtn, \
                 patch.object(tg, "InlineKeyboardMarkup") as MockMarkup:
             res = await adapter.send_whitelist_decision(
@@ -122,10 +125,7 @@ class TestWhitelistCallback:
         store = _FakeStore(admin=True, approved=True, scope="group")
         update, query = _make_query("linewl:approve:group:Cabc123")
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
-            with patch(
-                "plugins.platforms.line.whitelist_store.WhitelistStore",
-                return_value=store,
-            ):
+            with patch.object(_telegram, "_whitelist_store_class", return_value=lambda: store):
                 await adapter._handle_callback_query(update, MagicMock())
         assert ("approve_pending", "Cabc123", "999") in store.calls
         query.answer.assert_called_once()
@@ -137,10 +137,7 @@ class TestWhitelistCallback:
         store = _FakeStore(admin=True, ignore_ok=True)
         update, query = _make_query("linewl:ignore:dm:Uabc123")
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
-            with patch(
-                "plugins.platforms.line.whitelist_store.WhitelistStore",
-                return_value=store,
-            ):
+            with patch.object(_telegram, "_whitelist_store_class", return_value=lambda: store):
                 await adapter._handle_callback_query(update, MagicMock())
         assert ("ignore_pending", "Uabc123") in store.calls
 
@@ -150,10 +147,7 @@ class TestWhitelistCallback:
         store = _FakeStore(admin=True)
         update, query = _make_query("linewl:skip:room:Rabc123")
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
-            with patch(
-                "plugins.platforms.line.whitelist_store.WhitelistStore",
-                return_value=store,
-            ):
+            with patch.object(_telegram, "_whitelist_store_class", return_value=lambda: store):
                 await adapter._handle_callback_query(update, MagicMock())
         # skip must not mutate the store
         assert not any(c[0] in ("approve_pending", "ignore_pending") for c in store.calls)
@@ -165,10 +159,7 @@ class TestWhitelistCallback:
         store = _FakeStore(admin=False)
         update, query = _make_query("linewl:approve:group:Cabc123")
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
-            with patch(
-                "plugins.platforms.line.whitelist_store.WhitelistStore",
-                return_value=store,
-            ):
+            with patch.object(_telegram, "_whitelist_store_class", return_value=lambda: store):
                 await adapter._handle_callback_query(update, MagicMock())
         # non-admin: no mutation, no message edit
         assert not any(c[0] == "approve_pending" for c in store.calls)
@@ -180,10 +171,7 @@ class TestWhitelistCallback:
         adapter = _make_adapter()
         update, query = _make_query("linewl:approve:group:Cabc123")
         with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
-            with patch(
-                "plugins.platforms.line.whitelist_store.WhitelistStore",
-                side_effect=ImportError("line plugin missing"),
-            ):
+            with patch.object(_telegram, "_whitelist_store_class", side_effect=ImportError("line plugin missing")):
                 await adapter._handle_callback_query(update, MagicMock())
         # degrades: answered with "unavailable", never edits
         query.answer.assert_called_once()

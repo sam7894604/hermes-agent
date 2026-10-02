@@ -34,8 +34,10 @@ to show.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
+import sys
 import time
 from typing import Any, Optional
 
@@ -65,46 +67,57 @@ def _store_scope(ui_scope: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# WhitelistStore access (Phase 1)
+# WhitelistStore access
 # ---------------------------------------------------------------------------
 #
-# The store may not exist yet in this worktree (P1 lands separately). Import it
-# lazily inside a helper so this module still imports cleanly — the dashboard
-# plugin loader execs the file at startup, and a hard ImportError at module
-# top-level would drop ALL of these routes. When the store is missing we
-# surface a clean 503 per-request instead.
+# The store ships with the LINE platform override plugin (fork-plugins/platforms/line), not with
+# this dashboard plugin. Resolve it lazily per request so this module still mounts when the LINE
+# plugin is not installed — the endpoints then return a clean 503 instead of the whole router
+# failing to import.
+
+
+def _whitelist_store_module():
+    """The LINE override plugin's ``whitelist_store``: the module the plugin manager already loaded
+    (gateway process, any profile scope), else a path import from the installed plugin dir (the
+    dashboard process never loads platform plugins)."""
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("hermes_plugins.platforms__line") and name.endswith(".whitelist_store") and mod is not None:
+            return mod
+    cached = sys.modules.get("hermes_fork_line_whitelist_store")
+    if cached is not None:
+        return cached
+    from hermes_constants import get_hermes_home
+    path = get_hermes_home() / "plugins" / "platforms" / "line" / "whitelist_store.py"
+    spec = importlib.util.spec_from_file_location("hermes_fork_line_whitelist_store", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"LINE whitelist store not installed at {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules["hermes_fork_line_whitelist_store"] = mod
+    return mod
 
 
 def _get_store():
-    """Return a :class:`WhitelistStore` instance, or raise 503 if P1 absent.
-
-    Imported lazily (not at module top-level) so the plugin still mounts on a
-    tree where ``whitelist_store`` hasn't landed yet; the endpoints then return
-    a clean 503 rather than the whole router failing to import.
-    """
+    """Return a :class:`WhitelistStore` instance, or raise 503 when the LINE plugin is absent."""
     try:
-        from plugins.platforms.line.whitelist_store import WhitelistStore
-    except Exception as exc:  # pragma: no cover - depends on P1 presence
+        WhitelistStore = _whitelist_store_module().WhitelistStore
+    except Exception as exc:
         raise HTTPException(
             status_code=503,
             detail=(
                 "LINE whitelist store unavailable "
-                f"(Phase 1 whitelist_store not importable: {exc})"
+                f"(platforms/line override plugin not installed: {exc})"
             ),
         )
     return WhitelistStore()
 
 
 def _whitelist_error_cls():
-    """Return the ``WhitelistError`` type if importable, else a sentinel.
-
-    Used so ``remove`` can map the store's admin-no-delete guard to a 4xx
-    without a hard dependency on P1 at import time.
-    """
+    """Return the ``WhitelistError`` type if the LINE plugin is installed, else ``None`` (so ``remove``
+    can map the store's admin-no-delete guard to a 4xx without a hard import dependency)."""
     try:
-        from plugins.platforms.line.whitelist_store import WhitelistError
-        return WhitelistError
-    except Exception:  # pragma: no cover
+        return _whitelist_store_module().WhitelistError
+    except Exception:
         return None
 
 

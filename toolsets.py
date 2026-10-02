@@ -122,11 +122,6 @@ TOOLSETS = {
         "trigger scheduled tasks",
         ["cronjob_manage"],
     ),
-    "line_whitelist": _ts(
-        "LINE whitelist management - approve/list/remove DM & group whitelist entries. "
-        "Admin-gated (check_fn); off by default; excluded from subagents.",
-        ["line_whitelist"],
-    ),
     "file": _ts(
         "File manipulation tools: read, write, patch (with fuzzy matching), and "
         "search (content + files)",

@@ -17,11 +17,11 @@ _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
-# Importing the adapter triggers the shared discord mock (conftest).
-from plugins.platforms.discord.adapter import (  # noqa: E402
-    DiscordAdapter,
-    WhitelistDecisionView,
-)
+from tests.fork_plugins._plugin_loader import load_fork_plugin  # noqa: E402
+
+_discord = load_fork_plugin("platforms/discord").adapter
+DiscordAdapter = _discord.DiscordAdapter
+WhitelistDecisionView = _discord.WhitelistDecisionView
 from gateway.config import PlatformConfig  # noqa: E402
 import discord  # noqa: E402  (mocked via conftest)
 
@@ -65,10 +65,7 @@ class _FakeStore:
 
 
 def _patch_store(store):
-    return patch(
-        "plugins.platforms.line.whitelist_store.WhitelistStore",
-        return_value=store,
-    )
+    return patch.object(_discord, "_whitelist_store_class", return_value=lambda: store)
 
 
 def _make_view():
@@ -138,10 +135,7 @@ class TestWhitelistDecisionView:
     async def test_line_plugin_absent_degrades(self):
         view = _make_view()
         interaction = _make_interaction()
-        with patch(
-            "plugins.platforms.line.whitelist_store.WhitelistStore",
-            side_effect=ImportError("line plugin missing"),
-        ):
+        with patch.object(_discord, "_whitelist_store_class", side_effect=ImportError("line plugin missing")):
             await view.approve(interaction, None)
         # degrades: ephemeral "unavailable", never resolves the card
         assert view.resolved is False

@@ -6,7 +6,8 @@ FastAPI app; here we attach its router to a bare FastAPI instance so we can
 test the REST surface in isolation.
 
 The Phase-1 ``WhitelistStore`` may not exist in this worktree, so we inject a
-fake ``plugins.platforms.line.whitelist_store`` module into ``sys.modules``.
+fake ``hermes_plugins.platforms__line.whitelist_store`` module (the
+name the LINE override plugin gets in a gateway process) into ``sys.modules``.
 The plugin imports the store lazily inside its handlers, so the fake is what
 gets used.
 """
@@ -170,11 +171,11 @@ class _FakeStore:
 def fake_store(monkeypatch):
     """Install a fake whitelist_store module and reset its state each test."""
     _FakeStore.reset()
-    mod = types.ModuleType("plugins.platforms.line.whitelist_store")
+    mod = types.ModuleType("hermes_plugins.platforms__line.whitelist_store")
     mod.WhitelistStore = _FakeStore
     mod.WhitelistError = _FakeWhitelistError
     monkeypatch.setitem(
-        sys.modules, "plugins.platforms.line.whitelist_store", mod,
+        sys.modules, "hermes_plugins.platforms__line.whitelist_store", mod,
     )
     yield
 

@@ -1,4 +1,4 @@
-"""Tests for tools/line_whitelist_tool.py (Phase 3 agent approval tool).
+"""Tests for the LINE override plugin's ``line_whitelist`` tool (fork-plugins/platforms/line/line_whitelist_tool.py).
 
 The Phase-1 WhitelistStore may not exist in this worktree, so we MOCK it
 entirely: the tool reaches the store only through ``_get_store()`` (deferred
@@ -11,11 +11,16 @@ import json
 
 import pytest
 
-from tools import line_whitelist_tool as lwt
+import importlib
+
+from tests.fork_plugins._plugin_loader import load_fork_plugin
+
+load_fork_plugin("platforms/line")
+lwt = importlib.import_module("hermes_plugins.platforms__line.line_whitelist_tool")
 
 
 class _WhitelistError(Exception):
-    """Stand-in for plugins.platforms.line.whitelist_store.WhitelistError."""
+    """Stand-in for the LINE override plugin's ``whitelist_store.WhitelistError``."""
 
 
 class FakeStore:

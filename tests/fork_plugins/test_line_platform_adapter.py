@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from tests.gateway._plugin_adapter_loader import load_plugin_adapter
+from tests.fork_plugins._plugin_loader import load_fork_plugin
 
-_line = load_plugin_adapter("line")
+_line = load_fork_plugin("platforms/line").adapter
 
 LineAdapter = _line.LineAdapter
 _bot_mentioned = _line._bot_mentioned
@@ -393,7 +393,8 @@ class TestObservedMediaBackfill:
         target = tmp_path / 'receipt.pdf'
         target.write_bytes(b'payload')
         cache = AsyncMock(return_value=str(target))
-        monkeypatch.setattr(_line, 'cache_document_from_bytes_async', cache)
+        # ``_download_media`` is upstream's; it reads the cache helper off the bundled module.
+        monkeypatch.setattr(_line._base, 'cache_document_from_bytes_async', cache)
 
         result = await ad._bf_download('file1', 'file', file_name='receipt.pdf')
         assert result == (str(target), 'application/pdf')
@@ -444,7 +445,7 @@ class TestObservedMediaBackfill:
         vision = AsyncMock(return_value='{"success": true, "analysis": "Total 150000"}')
         monkeypatch.setattr(vt, "vision_analyze_tool", vision)
         # monkeypatch os.path.exists so the download cache hits on the 2nd call
-        monkeypatch.setattr("plugins.platforms.line.adapter.os.path.exists", lambda p: True)
+        monkeypatch.setattr("os.path.exists", lambda p: True)
         await ad._backfill_recent_media("Cok", "group")
         await ad._backfill_recent_media("Cok", "group")
         vision.assert_awaited_once()                  # extract-once

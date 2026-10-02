@@ -32,8 +32,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from collections import deque, OrderedDict
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote as _urlquote
 
 from agent.i18n import t
@@ -48,19 +47,6 @@ from gateway.platforms.base import (
 from gateway.platforms.helpers import MessageDeduplicator, cancel_task
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.config import Platform
-# LINE renders zero Markdown, so a GFM pipe table lands as literal "| a | b |"
-# rows in the bubble. Reuse the SAME shared converter Discord and Telegram
-# already use (PR #53284) rather than growing a LINE-specific one.
-from gateway.platforms.helpers import convert_table_to_bullets
-
-# Whitelist subsystem (Phase 1 — hot-reload store backed by config.yaml).
-# Relative import in the normal package context; fall back to the absolute
-# path when adapter.py is loaded as a standalone module (the test plugin
-# loader executes it outside its parent package).
-try:
-    from .whitelist_store import WhitelistStore
-except ImportError:  # pragma: no cover - standalone plugin-loader path
-    from plugins.platforms.line.whitelist_store import WhitelistStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,19 +55,10 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_LOADING_URL = "https://api.line.me/v2/bot/chat/loading/start"
 LINE_CONTENT_URL_FMT = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 LINE_BOT_INFO_URL = "https://api.line.me/v2/bot/info"
-# Name resolution (whitelist subsystem — display names for Dashboard / observed context)
-LINE_PROFILE_URL_FMT = "https://api.line.me/v2/bot/profile/{user_id}"
-LINE_GROUP_SUMMARY_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/summary"
-LINE_GROUP_MEMBER_URL_FMT = "https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
-LINE_ROOM_MEMBER_URL_FMT = "https://api.line.me/v2/bot/room/{room_id}/member/{user_id}"
-
-# LINE Messaging API hard limits
-LINE_PER_BUBBLE_CHARS = 5000  # Hard limit per text message object
-LINE_SAFE_BUBBLE_CHARS = 4500  # Conservative limit for chunking
-LINE_MAX_MESSAGES_PER_CALL = 5  # API rejects >5 messages per Reply/Push
-LINE_REPLY_TOKEN_TTL_SECONDS = 50  # Conservative cap below LINE's ~60s
-
-# Webhook hardening
+LINE_PER_BUBBLE_CHARS = 5000  # LINE hard limit
+LINE_SAFE_BUBBLE_CHARS = 4500  # conservative chunking limit
+LINE_MAX_MESSAGES_PER_CALL = 5
+LINE_REPLY_TOKEN_TTL_SECONDS = 50  # below LINE's ~60s
 WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB — webhooks are tiny JSON
 DEFAULT_WEBHOOK_PORT = 8646
 DEFAULT_WEBHOOK_PATH = "/line/webhook"
@@ -129,23 +106,9 @@ def strip_markdown_preserving_urls(text: str) -> str:
 
     Source: PR #18153 (leepoweii) — adapted to keep code-block content visible (LINE users frequently want
     command snippets to land as plain text, not be eaten by the fence).
-
-    Markdown tables are handled first by the shared ``convert_table_to_bullets``
-    (the same one Discord and Telegram call) — LINE has no table syntax either,
-    so a pipe table would otherwise survive this function as literal ``|`` rows.
     """
     if not text:
         return text
-
-    # Tables → bullet groups, via the shared cross-platform converter.
-    # MUST run before the strip rules below: the converter deliberately skips
-    # fenced code blocks, but once the fences are stripped a table *inside* a
-    # code block would look like a real table and be wrongly converted.
-    # The converter emits "**heading**" + "• field: value"; the bold markers
-    # are stripped below and the "•" bullets pass through the bullet rule
-    # untouched (it only matches -/*/+ markers), so the two compose cleanly.
-    text = convert_table_to_bullets(text)
-
     for pattern, repl in _MD_STRIP_RULES:
         text = pattern.sub(repl, text)
     return text
@@ -258,48 +221,6 @@ def _allowed_for_source(
     return bool(sid) and sid in {"dm": user_ids, "group": group_ids, "room": room_ids}[chat_type]
 
 
-# Unauthorized-source English replies (whitelist subsystem §2.6 / §2.7).
-UNAUTH_GROUP_REPLY = (
-    "This group isn't authorized to use the assistant yet. "
-    "An administrator has been notified — please wait for approval."
-)
-UNAUTH_DM_REPLY = (
-    "You're not authorized to use this assistant yet. "
-    "An administrator has been notified — please contact the admin for access."
-)
-
-
-def _message_text(msg: Dict[str, Any]) -> str:
-    """Best-effort plain-text extraction of an inbound message (for logging)."""
-    if (msg or {}).get("type") == "text":
-        return msg.get("text", "") or ""
-    return f"[{(msg or {}).get('type', 'unknown')}]"
-
-
-def _bot_mentioned(msg: Dict[str, Any], bot_user_id: Optional[str]) -> bool:
-    """True if this text message @-mentions the bot.
-
-    LINE puts mentions at ``message.mention.mentionees[]``; each entry carries
-    ``isSelf`` (bool) and ``userId``. A ``type == "all"`` (@everyone) entry is
-    NOT treated as addressing the bot specifically.
-    """
-    mention = (msg or {}).get("mention") or {}
-    for m in mention.get("mentionees", []) or []:
-        if not isinstance(m, dict):
-            continue
-        if m.get("type") == "all":
-            continue
-        if m.get("isSelf"):
-            return True
-        if bot_user_id and m.get("userId") == bot_user_id:
-            return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# LINE Reply / Push HTTP client
-# ---------------------------------------------------------------------------
-
 class _LineClient:
     """Thin aiohttp wrapper around the LINE Messaging API (no ``line-bot-sdk`` dependency)."""
 
@@ -307,19 +228,6 @@ class _LineClient:
         self._token = channel_access_token
         self._timeout = timeout
         self._headers = {"Authorization": f"Bearer {channel_access_token}", "Content-Type": "application/json"}
-        # Ids of messages this bot has sent (from the reply/push response
-        # ``sentMessages``). Used to treat a quote-reply of the bot's OWN
-        # message as an implicit @mention. Bounded so it can't grow unbounded.
-        self.sent_message_ids: Deque[str] = deque(maxlen=500)
-
-    def _record_sent(self, payload: Any) -> None:
-        try:
-            for m in (payload or {}).get("sentMessages", []) or []:
-                mid = m.get("id")
-                if mid:
-                    self.sent_message_ids.append(str(mid))
-        except Exception:
-            pass
 
     @staticmethod
     def _session(timeout: float):
@@ -332,10 +240,6 @@ class _LineClient:
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(f"LINE {label} {resp.status}: {body[:200]}")
-                try:
-                    self._record_sent(await resp.json())
-                except Exception:
-                    pass
 
     async def reply(self, reply_token: str, messages: List[Dict[str, Any]]) -> None:
         await self._post_messages(LINE_REPLY_URL, "reply", {"replyToken": reply_token, "messages": messages})
@@ -372,52 +276,6 @@ class _LineClient:
                     return None if resp.status >= 400 else (await resp.json()).get("userId")
         except Exception:
             return None
-
-    async def _get_json_field(self, url: str, field: str) -> Optional[str]:
-        """Shared GET helper for name-resolution endpoints. Best-effort."""
-        import aiohttp
-        timeout = aiohttp.ClientTimeout(total=10.0)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-                async with session.get(url, headers=self._headers) as resp:
-                    if resp.status >= 400:
-                        return None
-                    data = await resp.json()
-                    return data.get(field)
-        except Exception:
-            return None
-
-    async def get_profile(self, user_id: str) -> Optional[str]:
-        """Display name for a 1:1 / followed user (``GET /v2/bot/profile/{id}``)."""
-        if not user_id:
-            return None
-        return await self._get_json_field(
-            LINE_PROFILE_URL_FMT.format(user_id=user_id), "displayName"
-        )
-
-    async def get_group_summary(self, group_id: str) -> Optional[str]:
-        """Group name (``GET /v2/bot/group/{id}/summary``)."""
-        if not group_id:
-            return None
-        return await self._get_json_field(
-            LINE_GROUP_SUMMARY_URL_FMT.format(group_id=group_id), "groupName"
-        )
-
-    async def get_member_name(
-        self, chat_id: str, user_id: str, *, chat_type: str = "group"
-    ) -> Optional[str]:
-        """Display name of a member inside a group/room.
-
-        LINE's plain ``/profile`` endpoint does not work for arbitrary group
-        members — the group/room member endpoint is required.
-        """
-        if not chat_id or not user_id:
-            return None
-        if chat_type == "room":
-            url = LINE_ROOM_MEMBER_URL_FMT.format(room_id=chat_id, user_id=user_id)
-        else:
-            url = LINE_GROUP_MEMBER_URL_FMT.format(group_id=chat_id, user_id=user_id)
-        return await self._get_json_field(url, "displayName")
 
 
 def _text_message(text: str) -> Dict[str, Any]:
@@ -539,52 +397,6 @@ class LineAdapter(BasePlatformAdapter):
         self.allowed_users = allowlist("LINE_ALLOWED_USERS", "allowed_users")
         self.allowed_groups = allowlist("LINE_ALLOWED_GROUPS", "allowed_groups")
         self.allowed_rooms = allowlist("LINE_ALLOWED_ROOMS", "allowed_rooms")
-
-        # Whitelist subsystem (Phase 1): hot-reload store backed by
-        # config.yaml (platforms.line.*). The static env allowlists above are
-        # kept as a backward-compatible overlay — a source is authorized if it
-        # matches EITHER the env sets OR the live config store (so existing
-        # env-only deployments keep working while new entries hot-reload).
-        try:
-            self._whitelist: Optional[WhitelistStore] = WhitelistStore()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "LINE: WhitelistStore init failed (%s); env allowlists only", exc
-            )
-            self._whitelist = None
-        # Passive-context (observed) group recording — §6. Default on; the
-        # store/config `observe_unmentioned` flag can disable per deployment.
-        self._observe_unmentioned = _truthy_env(
-            "LINE_OBSERVE_UNMENTIONED",
-            bool(extra.get("observe_unmentioned", True)),
-        )
-        # On-demand media backfill: observed (unmentioned) uploads are recorded
-        # as a lightweight placeholder ONLY; when the bot IS later triggered and
-        # the triggering message carries no media of its own, we look back at the
-        # recently-observed image/file uploads within this window and pull them
-        # into the current turn. Env default here; the live value comes from the
-        # Dashboard-editable ``media_backfill_window_minutes`` (see the store).
-        self._backfill_window_minutes_default = float(
-            os.getenv("LINE_MEDIA_BACKFILL_WINDOW_MIN")
-            or extra.get("media_backfill_window_minutes", 1)
-        )
-        # Backfill cost control — "抽過的快取不重抽": the same recently-uploaded
-        # media can be pulled into several trigger turns inside the window, so we
-        # memoize both the LINE download and the vision extraction by the
-        # (immutable) LINE message id. Bounded FIFO so a busy group can't grow
-        # them without limit.
-        self._bf_download_cache: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
-        self._bf_vision_cache: "OrderedDict[str, str]" = OrderedDict()
-        self._bf_cache_max = int(
-            os.getenv("LINE_MEDIA_BACKFILL_CACHE_MAX")
-            or extra.get("media_backfill_cache_max", 256)
-        )
-        # Name-resolution TTL cache: id -> (display_name, expiry_ts).
-        self._name_cache: Dict[str, Tuple[str, float]] = {}
-        self._name_cache_ttl = float(
-            os.getenv("LINE_NAME_CACHE_TTL") or extra.get("name_cache_ttl", 3600)
-        )
-
         # Slow-LLM postback button threshold + user-overridable copy
         threshold = env_or("LINE_SLOW_RESPONSE_THRESHOLD", "slow_response_threshold", DEFAULT_SLOW_RESPONSE_THRESHOLD)
         self.slow_response_threshold = _coerce(float, threshold, DEFAULT_SLOW_RESPONSE_THRESHOLD)
@@ -603,9 +415,6 @@ class LineAdapter(BasePlatformAdapter):
         # LINE redelivers webhooks for up to a day on non-2xx; no TTL, just a size bound.
         self._dedup = MessageDeduplicator(max_size=1000, ttl_seconds=float("inf"))
         self._bot_user_id: Optional[str] = None
-        # One-shot flag so the fail-open mention-gate warning is logged once
-        # per connection, not once per inbound message.
-        self._mention_gate_warned: bool = False
         self._media_tokens: Dict[str, Tuple[str, float]] = {}  # token → (path, expiry)
         self._media_temp_paths: Set[str] = set()
         self._media_ttl = MEDIA_TOKEN_TTL_SECONDS
@@ -623,29 +432,11 @@ class LineAdapter(BasePlatformAdapter):
         if not self._acquire_platform_lock("line", tok_hash, "LINE channel"):
             return False
         self._client = _LineClient(self.channel_access_token)
-
-        # Best-effort: fetch our own bot userId for self-message filtering.
-        # If the call fails (offline tests, transient 5xx) we fall back to
-        # not filtering self-events; the cost is minor (LINE doesn't
-        # actually echo our own messages back).
-        self._mention_gate_warned = False  # fresh warning per connection cycle
-        try:
+        try:  # best-effort self-userId for self-echo filtering (LINE rarely echoes anyway)
             self._bot_user_id = await self._client.get_bot_user_id()
         except Exception as exc:
             logger.debug("LINE: get_bot_user_id failed: %s", exc)
             self._bot_user_id = None
-        if self._bot_user_id:
-            logger.info(
-                "LINE: bot userId resolved (%s…) — @mention gate active",
-                self._bot_user_id[:8],
-            )
-        else:
-            logger.warning(
-                "LINE: bot userId NOT resolved at connect — @mention gate will "
-                "fail-open (authorized groups reply without @mention)."
-            )
-
-        # Spin up the aiohttp webhook server.
         try:
             from aiohttp import web
         except ImportError:
@@ -731,694 +522,52 @@ class LineAdapter(BasePlatformAdapter):
             return
         if self._bot_user_id and source.get("userId", "") == self._bot_user_id:
             return
-
-        authorized = self._source_authorized(source)
-
+        if not _allowed_for_source(source, allow_all=self.allow_all, user_ids=self.allowed_users,
+                                   group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
+            logger.info("LINE: rejecting unauthorized source %s", source)
+            return
         if event_type == "message":
-            # Message events carry the routing nuance (@mention gating,
-            # unauthorized English reply, passive observe-recording), so the
-            # authorization *decision* is made here but the *policy* is applied
-            # inside the handler where replyToken / mention / text are known.
-            await self._handle_message_event(event, authorized=authorized)
+            await self._handle_message_event(event)
         elif event_type == "postback":
-            # Postbacks only make sense from an already-authorized source
-            # (the button was sent to them after a prior authorized turn).
-            if not authorized:
-                logger.info("LINE: rejecting postback from unauthorized %s", source)
-                return
             await self._handle_postback_event(event)
-        elif event_type in {"follow", "join"}:
-            # New source reached the bot — notify admins once (dedup) so they
-            # can approve it via the dashboard / approval tool.
-            logger.info("LINE: lifecycle event %s from %s", event_type, source)
-            if not authorized:
-                await self._maybe_notify_new_source(source)
-        elif event_type in {"unfollow", "leave"}:
+        elif event_type in _LIFECYCLE_EVENTS:
             logger.info("LINE: lifecycle event %s from %s", event_type, source)
         else:
             logger.debug("LINE: ignoring event type %r", event_type)
 
-    async def _handle_message_event(
-        self, event: Dict[str, Any], *, authorized: bool = True
-    ) -> None:
+    async def _handle_message_event(self, event: Dict[str, Any]) -> None:
         msg = event.get("message") or {}
         msg_type, message_id = msg.get("type", ""), msg.get("id", "")
         reply_token = event.get("replyToken", "")
         source = event.get("source") or {}
         chat_id, chat_type = _resolve_chat(source)
         user_id = source.get("userId", "") or chat_id
-
-        # Stash the reply token for outbound use (reject replies use it too).
-        if chat_id and reply_token:
-            self._reply_tokens[chat_id] = (
-                reply_token,
-                time.time() + LINE_REPLY_TOKEN_TTL_SECONDS,
-            )
-
-        mentioned = _bot_mentioned(msg, self._bot_user_id)
-
-        # Quote-reply of the bot's OWN message = implicit @mention: replying to
-        # something Toothless said is clearly addressing it, so the user should
-        # not have to type "@Toothless" again. LINE puts the quoted message's id
-        # in ``quotedMessageId``; we only treat it as a mention when that id is
-        # one WE sent (tracked in _LineClient.sent_message_ids) — quoting another
-        # member's message does NOT count (stays observe-only).
-        if not mentioned:
-            qmid = (msg or {}).get("quotedMessageId")
-            if qmid and self._client and str(qmid) in self._client.sent_message_ids:
-                mentioned = True
-
-        # ---- Authorization / routing policy (whitelist subsystem) ----------
-        if chat_type == "dm":
-            if not authorized:
-                # Stranger DM: throttled English reply + notify admins (dedup)
-                # + record the attempt. Never trigger the agent. (§2.7)
-                await self._reject_unauthorized(
-                    chat_id=chat_id, chat_type=chat_type, user_id=user_id,
-                    reply_token=reply_token, attempt_text=_message_text(msg),
-                    dm=True,
-                )
-                return
-            # authorized DM → trigger (no @mention required)
-        else:  # group / room
-            if not authorized:
-                # Unauthorized group: reply English only if the bot was @'d
-                # (throttled) + notify admins (dedup). Non-@ stays silent, and
-                # we do NOT observe-record content from a non-whitelisted
-                # group. (§2.6 / §6.5)
-                if mentioned:
-                    await self._reject_unauthorized(
-                        chat_id=chat_id, chat_type=chat_type, user_id=user_id,
-                        reply_token=reply_token, attempt_text="", dm=False,
-                    )
-                return
-            # authorized group/room
-            requires_mention = self._group_requires_mention(chat_id)
-            if requires_mention and self._bot_user_id is None:
-                # SAFETY FAIL-OPEN: matching LINE mentionees requires our own
-                # bot userId, fetched via GET /v2/bot/info at connect(). If that
-                # failed, _bot_mentioned() can NEVER return True — enforcing the
-                # mention gate here would silence every message in an authorized
-                # group (over-correction). Fall back to pre-whitelist behaviour
-                # (trigger the agent) and warn once so the operator can fix it.
-                self._warn_mention_gate_unavailable()
-            elif requires_mention and not mentioned:
-                # Passive observe-record — record as context, do NOT trigger. (§6)
-                await self._observe_record(
-                    source=source, chat_id=chat_id, chat_type=chat_type,
-                    user_id=user_id, msg=msg, msg_type=msg_type,
-                    message_id=message_id,
-                )
-                return
-            # mentioned / requires_mention disabled / gate unavailable → trigger
-
-        # ---- Trigger path: media + build event + handle_message ------------
-        # Handle media inbound — fetch the binary, cache it, and surface a
-        # vision-tool-friendly local path on the MessageEvent.
+        if chat_id and reply_token:  # stash the reply token for outbound use
+            self._reply_tokens[chat_id] = (reply_token, time.time() + LINE_REPLY_TOKEN_TTL_SECONDS)
         media_urls: List[str] = []
         media_types: List[str] = []
         if msg_type == "text":
             text = msg.get("text", "") or ""
         elif msg_type in _INBOUND_MEDIA_EXT:  # fetch, cache, surface a vision-friendly local path
-            file_name = msg.get("fileName") or msg.get("file_name") or ""
             local_path, media_type = await self._download_media(
-                message_id, msg_type, filename=file_name or None)
+                message_id, msg_type, filename=msg.get("fileName") or msg.get("file_name"))
             if local_path:
-                media_urls.append(local_path)
-                media_types.append(media_type)
-            # Surface the real filename in the placeholder so the agent can
-            # refer to the document naturally (e.g. "[file: receipt.pdf]").
-            text = (
-                f"[file: {file_name}]"
-                if (msg_type == "file" and file_name)
-                else f"[{msg_type}]"
-            )
+                media_urls, media_types = [local_path], [media_type]
+            text = f"[{msg_type}]"
         elif msg_type == "sticker":
             text = f"[sticker: {', '.join(msg['keywords'])}]" if msg.get("keywords") else "[sticker]"
         elif msg_type == "location":
             text = f"[location: {msg.get('title', '')} {msg.get('address', '')}]".strip()
         else:
             text = f"[unsupported message type: {msg_type}]"
-
-        # On-demand media backfill (§6/§7): a triggering GROUP message that
-        # carries no media of its own — e.g. "@Toothless what's the amount on
-        # that receipt?" after silently uploading it — deterministically pulls in
-        # the recently OBSERVED image/file uploads within the backfill window.
-        # Images are vision-read (cached) and injected as channel_context text;
-        # files are attached as media so the agent can extract them. Complements
-        # quote-reply (explicit) for the "剛剛那張" case where the user didn't
-        # quote. The program decides — the model never has to search. No media of
-        # its own → only then.
-        backfill_context: Optional[str] = None
-        if not media_urls and chat_type in {"group", "room"}:
-            backfill_context, bf_urls, bf_types = await self._backfill_recent_media(
-                chat_id, chat_type
-            )
-            if bf_urls:
-                media_urls.extend(bf_urls)
-                media_types.extend(bf_types)
-
-        if chat_type in {"group", "room"}:
-            observed_context = await self._recent_observed_context(chat_id, chat_type)
-            backfill_context = "\n\n".join(
-                part for part in (observed_context, backfill_context) if part
-            ) or None
-
-        # Let the gateway's shared reply-context path render the resolved quote.
-        quote_ctx = await self._quote_context(source, chat_id, chat_type, msg)
-        quoted_id = str(msg.get("quotedMessageId") or "") or None
-
-        # Best-effort typing indicator (DM only).
-        if chat_type == "dm" and self._client:
+        if chat_type == "dm" and self._client:  # best-effort typing indicator (DM only)
             asyncio.create_task(self._client.loading(chat_id))
-
-        # Best-effort display-name resolution (falls back to raw IDs). §2.3
-        user_name = await self._resolve_name(chat_id, chat_type, user_id) or user_id
-        chat_name = await self._resolve_chat_name(chat_id, chat_type) or chat_id
-
         source_obj = self.build_source(
-            chat_id=chat_id,
-            chat_type=chat_type,
-            user_id=user_id,
-            user_name=user_name,
-            chat_name=chat_name,
-            message_id=message_id,
-        )
-
-        event_obj = MessageEvent(
-            text=text,
-            message_type=_LINE_MESSAGE_TYPES.get(msg_type, MessageType.TEXT),
-            source=source_obj,
-            raw_message=event,
-            message_id=message_id,
-            media_urls=media_urls,
-            media_types=media_types,
-            reply_to_message_id=quoted_id,
-            reply_to_text=quote_ctx,
-            reply_to_is_own_message=bool(
-                quoted_id and self._client and quoted_id in self._client.sent_message_ids
-            ),
-            # Deterministic media-backfill content (vision text for recent group
-            # images + recent-uploads hint); gateway prepends it to this turn.
-            channel_context=backfill_context,
-        )
-
-        await self.handle_message(event_obj)
-
-    # ------------------------------------------------------------------
-    # Whitelist subsystem — authorization / observe / notify / naming
-    # ------------------------------------------------------------------
-
-    def _source_authorized(self, source: Dict[str, Any]) -> bool:
-        """Authorized if the source matches the static env allowlists
-        (backward-compat) OR the live config-backed whitelist store (which
-        hot-reloads on every query)."""
-        if _allowed_for_source(
-            source,
-            allow_all=self.allow_all,
-            user_ids=self.allowed_users,
-            group_ids=self.allowed_groups,
-            room_ids=self.allowed_rooms,
-        ):
-            return True
-        if self._whitelist is not None:
-            sid, stype = _resolve_chat(source)
-            try:
-                return bool(sid) and self._whitelist.is_allowed(stype, sid)
-            except Exception:
-                logger.debug("LINE: whitelist store query failed", exc_info=True)
-        return False
-
-    def _group_requires_mention(self, chat_id: str) -> bool:
-        if self._whitelist is None:
-            return True
-        try:
-            return bool(self._whitelist.requires_mention(chat_id))
-        except Exception:
-            return True
-
-    def _warn_mention_gate_unavailable(self) -> None:
-        """Warn (once per connection) that the @mention gate cannot be enforced
-        because our own bot userId is unknown, so it has failed open."""
-        if self._mention_gate_warned:
-            return
-        self._mention_gate_warned = True
-        logger.warning(
-            "LINE: requires_mention is enabled but the bot userId is unknown "
-            "(GET /v2/bot/info failed at connect) — @mention detection is "
-            "impossible, so the mention gate is DISABLED (fail-open): authorized "
-            "groups will keep receiving replies WITHOUT an @mention. Restore "
-            "connectivity to https://api.line.me/v2/bot/info (check "
-            "LINE_CHANNEL_ACCESS_TOKEN) and reconnect to re-enable mention gating."
-        )
-
-    async def _send_plain(self, chat_id: str, reply_token: str, text: str) -> None:
-        """Send one plain-text bubble via reply (preferred) or push fallback."""
-        if not self._client or not text:
-            return
-        messages = [_text_message(text)]
-        if reply_token:
-            try:
-                await self._client.reply(reply_token, messages)
-                return
-            except Exception:
-                logger.debug("LINE: plain reply failed, trying push", exc_info=True)
-        try:
-            await self._client.push(chat_id, messages)
-        except Exception:
-            logger.debug("LINE: plain push failed", exc_info=True)
-
-    def _load_gateway_config(self):
-        try:
-            from gateway.config import load_gateway_config
-            return load_gateway_config()
-        except Exception:
-            logger.debug("LINE: load_gateway_config failed", exc_info=True)
-            return None
-
-    async def _notify_admin_unauthorized(
-        self, chat_type: str, source_id: str, display: str = ""
-    ) -> None:
-        """Notify admins about an unauthorized/new source (deduped in helper)."""
-        if self._whitelist is None:
-            return
-        gw = self._load_gateway_config()
-        if gw is None:
-            return
-        try:
-            try:
-                from .whitelist_notify import notify_unauthorized
-            except ImportError:  # pragma: no cover - standalone plugin-loader path
-                from plugins.platforms.line.whitelist_notify import notify_unauthorized
-            await notify_unauthorized(
-                self._whitelist, gw,
-                source_type=chat_type, source_id=source_id, display=display,
-            )
-        except Exception:
-            logger.debug("LINE: notify_unauthorized failed", exc_info=True)
-
-    async def _source_display_name(self, chat_id: str, chat_type: str, user_id: str) -> str:
-        """Best-effort display name for a SOURCE (pending-queue attribution).
-
-        A group/room source resolves to the group name (getGroupSummary); a DM
-        source resolves to the sender's profile name. Falls back to '' so the
-        caller can substitute the raw id.
-        """
-        if chat_type == "dm":
-            return await self._resolve_name(chat_id, chat_type, user_id) or ""
-        return await self._resolve_chat_name(chat_id, chat_type) or ""
-
-    def _record_pending(self, source_id: str, source_type: str, name: str) -> None:
-        """Log an unauthorized attempt into the pending queue (best-effort)."""
-        if self._whitelist is None:
-            return
-        try:
-            self._whitelist.record_attempt(
-                source_id, platform="line", source_type=source_type, name=name,
-            )
-        except Exception:
-            logger.debug("LINE: record_attempt failed", exc_info=True)
-
-    async def _maybe_notify_new_source(self, source: Dict[str, Any]) -> None:
-        sid, stype = _resolve_chat(source)
-        if not sid:
-            return
-        name = await self._resolve_chat_name(sid, stype) or ""
-        self._record_pending(sid, stype, name)
-        await self._notify_admin_unauthorized(stype, sid, display=name or sid)
-
-    async def _reject_unauthorized(
-        self, *, chat_id: str, chat_type: str, user_id: str,
-        reply_token: str, attempt_text: str, dm: bool,
-    ) -> None:
-        """Unauthorized-source handling: record the attempt into the pending
-        queue (with resolved name), notify admins (dedup), send a throttled
-        English reply."""
-        name = await self._source_display_name(chat_id, chat_type, user_id)
-        self._record_pending(chat_id, chat_type, name)
-        await self._notify_admin_unauthorized(
-            chat_type, chat_id, display=name or (user_id if dm else chat_id)
-        )
-
-        if self._whitelist is not None:
-            try:
-                if not self._whitelist.should_reply_unauthorized(chat_id):
-                    return
-            except Exception:
-                pass
-        await self._send_plain(
-            chat_id, reply_token, UNAUTH_DM_REPLY if dm else UNAUTH_GROUP_REPLY
-        )
-        if self._whitelist is not None:
-            try:
-                self._whitelist.mark_unauthorized_replied(chat_id)
-            except Exception:
-                logger.debug("LINE: mark_unauthorized_replied failed", exc_info=True)
-
-    # -- name resolution (TTL-cached, best-effort) --------------------------
-
-    def _name_cache_get(self, key: str) -> Optional[str]:
-        hit = self._name_cache.get(key)
-        if hit and hit[1] > time.time():
-            return hit[0]
-        return None
-
-    def _name_cache_put(self, key: str, value: Optional[str]) -> None:
-        if value:
-            self._name_cache[key] = (value, time.time() + self._name_cache_ttl)
-
-    async def _resolve_name(
-        self, chat_id: str, chat_type: str, user_id: str
-    ) -> Optional[str]:
-        """Display name of a user. DM → profile; group/room → member profile."""
-        if not user_id or not self._client:
-            return None
-        ck = (
-            f"u:{chat_id}:{user_id}"
-            if chat_type in {"group", "room"}
-            else f"u:{user_id}"
-        )
-        cached = self._name_cache_get(ck)
-        if cached:
-            return cached
-        try:
-            if chat_type == "dm":
-                name = await self._client.get_profile(user_id)
-            else:
-                name = await self._client.get_member_name(
-                    chat_id, user_id, chat_type=chat_type
-                )
-        except Exception:
-            name = None
-        self._name_cache_put(ck, name)
-        return name
-
-    async def _resolve_chat_name(
-        self, chat_id: str, chat_type: str
-    ) -> Optional[str]:
-        if not chat_id or not self._client or chat_type != "group":
-            return None
-        ck = f"g:{chat_id}"
-        cached = self._name_cache_get(ck)
-        if cached:
-            return cached
-        try:
-            name = await self._client.get_group_summary(chat_id)
-        except Exception:
-            name = None
-        self._name_cache_put(ck, name)
-        return name
-
-    # -- passive observe recording (§6) + quote reply (§8) ------------------
-
-    async def _observe_record(
-        self, *, source: Dict[str, Any], chat_id: str, chat_type: str,
-        user_id: str, msg: Dict[str, Any], msg_type: str, message_id: str,
-    ) -> None:
-        """Record a message as passive observed context (no agent turn).
-
-        Media policy (§7): drop video/audio entirely; record text. Images and
-        files are recorded as a LIGHTWEIGHT ``[image]`` / ``[file: name]``
-        placeholder together with their LINE ``platform_message_id`` — NO
-        download or extraction here (cheap). When the bot is later triggered and
-        the triggering message has no media of its own, ``_backfill_recent_media``
-        re-fetches these recently-observed uploads within the backfill window and
-        pulls them into that turn (on-demand, not per-message). The observed rows
-        land in a single shared, chat-scoped session (per-user identity dropped).
-        """
-        if not self._observe_unmentioned:
-            return
-        store = getattr(self, "_session_store", None)
-        if store is None:
-            return
-        if msg_type in {"video", "audio"}:
-            return  # dropped by policy — not recorded, not fetched
-        if msg_type == "text":
-            body = msg.get("text", "") or ""
-        elif msg_type == "file":
-            fname = msg.get("fileName", "")
-            body = f"[file: {fname}]" if fname else "[file]"
-        elif msg_type in {"image", "sticker", "location"}:
-            body = f"[{msg_type}]"
-        else:
-            body = f"[{msg_type}]"
-        if not body:
-            return
-        name = await self._resolve_name(chat_id, chat_type, user_id) or user_id
-        content = f"[{name}|{user_id}]\n{body}"
-        try:
-            shared = self.build_source(
-                chat_id=chat_id,
-                chat_type=chat_type,
-                chat_name=(await self._resolve_chat_name(chat_id, chat_type) or chat_id),
-            )
-            entry = store.get_or_create_session(shared)
-            store.append_to_transcript(
-                entry.session_id,
-                {
-                    "role": "user",
-                    "content": content,
-                    "observed": True,
-                    "platform_message_id": message_id,
-                },
-            )
-        except Exception:
-            logger.debug("LINE: observe-record failed", exc_info=True)
-
-    def _backfill_window_seconds(self) -> float:
-        """Live backfill window in seconds — Dashboard-editable
-        ``media_backfill_window_minutes`` (config, hot-reload), else the env/
-        extra default. 0 disables backfill."""
-        minutes = self._backfill_window_minutes_default
-        wl = getattr(self, "_whitelist", None)
-        if wl is not None:
-            try:
-                v = wl.get_settings().get("media_backfill_window_minutes")
-                if v is not None:
-                    minutes = float(v)
-            except Exception:
-                pass
-        return max(0.0, minutes) * 60.0
-
-    async def _recent_observed_context(self, chat_id: str, chat_type: str) -> Optional[str]:
-        """Read shared passive context without merging per-user conversation histories."""
-        store = getattr(self, "_session_store", None)
-        if not self._observe_unmentioned or store is None:
-            return None
-        try:
-            shared = self.build_source(chat_id=chat_id, chat_type=chat_type)
-            entry = await asyncio.to_thread(store.get_or_create_session, shared)
-            db = getattr(store, "_db", None)
-            if db is None:
-                return None
-            rows = await asyncio.to_thread(db.get_messages, entry.session_id)
-            observed = [str(row["content"]) for row in rows
-                        if row.get("observed") and row.get("role") == "user" and row.get("content")]
-            if not observed:
-                return None
-            body = "\n\n".join(observed[-20:])[-10000:]
-            return "[Observed LINE group context - context only, not requests]\n" + body
-        except Exception:
-            logger.debug("LINE: passive context lookup failed", exc_info=True)
-            return None
-
-    def _bf_cache_get(self, cache: "OrderedDict", key: str):
-        """FIFO-cache lookup that refreshes recency on hit."""
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
-        return None
-
-    def _bf_cache_put(self, cache: "OrderedDict", key: str, value) -> None:
-        cache[key] = value
-        cache.move_to_end(key)
-        while len(cache) > self._bf_cache_max:
-            cache.popitem(last=False)
-
-    async def _bf_download(
-        self, message_id: str, kind: str, file_name: str = "",
-    ) -> Optional[Tuple[str, str]]:
-        """Download-once memoization for backfill: reuse the cached file for a
-        LINE message id as long as it still exists on disk, else re-fetch."""
-        hit = self._bf_cache_get(self._bf_download_cache, message_id)
-        if hit is not None:
-            path, mime = hit
-            if path and os.path.exists(path):
-                return hit
-        try:
-            downloaded = await self._download_media(
-                message_id, kind, filename=file_name
-            )
-        except Exception:
-            downloaded = None
-        if downloaded and downloaded[0]:
-            self._bf_cache_put(self._bf_download_cache, message_id, downloaded)
-            return downloaded
-        return None
-
-    async def _bf_vision(self, message_id: str, path: str) -> Optional[str]:
-        """Extract-once memoization: vision-read an image and cache the analysis
-        text by the (immutable) LINE message id so re-pulling the same image
-        into a later trigger turn never re-runs vision. §7 cost control."""
-        cached = self._bf_cache_get(self._bf_vision_cache, message_id)
-        if cached is not None:
-            return cached
-        try:
-            from tools.vision_tools import vision_analyze_tool
-            raw = await vision_analyze_tool(
-                image_url=path,
-                user_prompt=(
-                    "請描述這張圖片的內容。若是收據、帳單、發票或菜單，"
-                    "逐項列出商家名稱、各品項與金額、稅/服務費與總金額（含幣別）。"
-                ),
-            )
-            text = ""
-            try:
-                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                if data.get("success"):
-                    text = str(data.get("analysis") or "").strip()
-            except (ValueError, TypeError, AttributeError):
-                text = str(raw or "").strip()
-            if text:
-                self._bf_cache_put(self._bf_vision_cache, message_id, text)
-            return text or None
-        except Exception:
-            logger.debug("LINE: backfill vision failed", exc_info=True)
-            return None
-
-    async def _backfill_recent_media(
-        self, chat_id: str, chat_type: str,
-    ) -> Tuple[Optional[str], List[str], List[str]]:
-        """On-demand, deterministic media backfill (§6/§7). When the bot is
-        triggered but the triggering message carries no media of its own, look
-        back at recently-OBSERVED (unmentioned) image/file uploads in this group
-        within the backfill window and make their content available to THIS turn
-        — the program decides, the (weak) model never has to search.
-
-        * **Images** are vision-read here (extract-once, cached by message id)
-          and their analysis is injected as ``channel_context`` text — so we do
-          NOT re-attach the raw image every turn (the gateway's vision pass has
-          no cache and would re-bill it). This doubles as the auxiliary prompt
-          hint listing recent uploads.
-        * **Files/PDFs** are downloaded (download-once cache) and returned as
-          ``media_urls`` so the agent can extract them with its file tools.
-
-        Returns ``(channel_context, media_urls, media_types)``. Best-effort;
-        never raises."""
-        window = self._backfill_window_seconds()
-        if window <= 0:
-            return None, [], []
-        store = getattr(self, "_session_store", None)
-        if store is None or chat_type not in {"group", "room"}:
-            return None, [], []
-        _MAX_BACKFILL = 3
-        try:
-            shared = self.build_source(chat_id=chat_id, chat_type=chat_type)
-            entry = store.get_or_create_session(shared)
-            db = getattr(store, "_db", None)
-            if db is None or not hasattr(db, "get_messages"):
-                return None, [], []
-            now = time.time()
-            # (message_id, kind, hhmm, file_name)
-            candidates: List[Tuple[str, str, str, str]] = []
-            for row in db.get_messages(entry.session_id):
-                if not row.get("observed"):
-                    continue
-                ts = row.get("timestamp")
-                try:
-                    if ts is not None and (now - float(ts)) > window:
-                        continue
-                    hhmm = time.strftime("%H:%M", time.localtime(float(ts))) if ts else "?"
-                except (TypeError, ValueError):
-                    continue
-                mid = str(row.get("platform_message_id") or "")
-                if not mid:
-                    continue
-                content = str(row.get("content") or "")
-                if "[image]" in content:
-                    candidates.append((mid, "image", hhmm, ""))
-                elif "[file" in content:
-                    # content tail is "[file: name.pdf]" — recover the name.
-                    fname = ""
-                    marker = "[file: "
-                    if marker in content:
-                        fname = content.split(marker, 1)[1].split("]", 1)[0].strip()
-                    candidates.append((mid, "file", hhmm, fname))
-            # Most recent first, capped.
-            hint_lines: List[str] = []
-            urls: List[str] = []
-            types: List[str] = []
-            for mid, kind, hhmm, fname in list(reversed(candidates))[:_MAX_BACKFILL]:
-                downloaded = await self._bf_download(mid, kind, file_name=fname)
-                if not downloaded:
-                    continue
-                path, mime = downloaded
-                if kind == "image":
-                    analysis = await self._bf_vision(mid, path)
-                    if analysis:
-                        hint_lines.append(f"- 圖片（{hhmm} 上傳）內容：{analysis}")
-                    else:
-                        hint_lines.append(f"- 圖片（{hhmm} 上傳）：無法辨識內容")
-                else:
-                    urls.append(path)
-                    types.append(mime or kind)
-                    label = fname or "檔案"
-                    hint_lines.append(
-                        f"- 檔案 {label}（{hhmm} 上傳）：已附上本回合，可用檔案工具讀取"
-                    )
-            channel_context = None
-            if hint_lines:
-                channel_context = (
-                    "[近期本群組上傳的媒體 / Recently uploaded media in this group]\n"
-                    + "\n".join(hint_lines)
-                )
-                logger.info(
-                    "LINE: backfilled %d recent observed media into trigger turn "
-                    "(chat %s, window %.0fs, %d file attach)",
-                    len(hint_lines), chat_id, window, len(urls),
-                )
-            return channel_context, urls, types
-        except Exception:
-            logger.debug("LINE: media backfill failed", exc_info=True)
-            return None, [], []
-
-    async def _quote_context(
-        self, source: Dict[str, Any], chat_id: str, chat_type: str,
-        msg: Dict[str, Any],
-    ) -> Optional[str]:
-        """If this message quotes an earlier one (``quotedMessageId``), look up
-        the original in the transcript and return it as a context string.
-
-        Best-effort: degrades to a short marker if the original can't be
-        found (unrecorded, or aged out of retention). §8.
-        """
-        qmid = (msg or {}).get("quotedMessageId")
-        if not qmid:
-            return None
-        store = getattr(self, "_session_store", None)
-        if store is None:
-            return None
-        try:
-            if chat_type in {"group", "room"}:
-                lookup_src = self.build_source(chat_id=chat_id, chat_type=chat_type)
-            else:
-                lookup_src = self.build_source(
-                    chat_id=chat_id, chat_type=chat_type,
-                    user_id=source.get("userId"),
-                )
-            entry = store.get_or_create_session(lookup_src)
-            db = getattr(store, "_db", None)
-            if db is None or not hasattr(db, "get_messages"):
-                return "(In reply to an earlier message.)"
-            for row in db.get_messages(entry.session_id):
-                if str(row.get("platform_message_id") or "") == str(qmid):
-                    original = (row.get("content") or "").strip()
-                    if original:
-                        return f"[Quoted message]\n{original}"
-                    break
-        except Exception:
-            logger.debug("LINE: quote lookup failed", exc_info=True)
-        return "(In reply to an earlier message.)"
+            chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id,
+            message_id=message_id)
+        await self.handle_message(MessageEvent(
+            text=text, message_type=_LINE_MESSAGE_TYPES.get(msg_type, MessageType.TEXT), source=source_obj,
+            raw_message=event, message_id=message_id, media_urls=media_urls, media_types=media_types))
 
     async def _handle_postback_event(self, event: Dict[str, Any]) -> None:
         """User tapped the slow-LLM postback button — deliver the cached payload. READY replies (push

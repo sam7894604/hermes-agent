@@ -4338,81 +4338,6 @@ class TelegramAdapter(BasePlatformAdapter):
             "send_exec_approval", prompt.chat_id, prompt.metadata, build, parse_mode=ParseMode.HTML,
             thread_id=self._metadata_thread_id(prompt.metadata), reply_to_mode=self._reply_to_mode)
 
-    async def send_whitelist_decision(
-        self,
-        chat_id: str,
-        source_type: str,
-        source_id: str,
-        name: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send an interactive LINE whitelist-decision card (Approve/Ignore/Skip).
-
-        Used by the LINE whitelist ``notify_unauthorized`` bridge when the
-        notify target platform is Telegram. Tapping a button calls the shared
-        ``WhitelistStore`` (approve/ignore) from ``_handle_callback_query``'s
-        ``linewl:`` branch. Additive: this shares no state with the existing
-        approval/confirm flows.
-
-        ``callback_data`` stays well under Telegram's 64-byte limit:
-        ``linewl:<action>:<source_type>:<source_id>`` — LINE ids are ~33 ascii
-        chars and contain no colons, so the id is always the final field.
-        """
-        if not self._bot:
-            return SendResult(success=False, error="Not connected")
-
-        try:
-            who = name or source_id
-            text = (
-                "🔔 <b>LINE: unauthorized access attempt</b>\n\n"
-                f"type: {_html.escape(str(source_type))}\n"
-                f"id: <code>{_html.escape(str(source_id))}</code>\n"
-                f"name: {_html.escape(str(who))}"
-            )
-
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ Approve",
-                        callback_data=f"linewl:approve:{source_type}:{source_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "⛔ Ignore",
-                        callback_data=f"linewl:ignore:{source_type}:{source_id}",
-                    ),
-                    InlineKeyboardButton(
-                        "➖ Skip",
-                        callback_data=f"linewl:skip:{source_type}:{source_id}",
-                    ),
-                ],
-            ])
-
-            thread_id = self._metadata_thread_id(metadata)
-            kwargs: Dict[str, Any] = {
-                "chat_id": normalize_telegram_chat_id(chat_id),
-                "text": text,
-                "parse_mode": ParseMode.HTML,
-                "reply_markup": keyboard,
-                **self._link_preview_kwargs(),
-            }
-            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
-            kwargs["reply_to_message_id"] = reply_to_id
-            kwargs.update(
-                self._thread_kwargs_for_send(
-                    chat_id,
-                    thread_id,
-                    metadata,
-                    reply_to_message_id=reply_to_id,
-                    reply_to_mode=self._reply_to_mode,
-                )
-            )
-
-            msg = await self._send_message_with_thread_fallback(**kwargs)
-            return SendResult(success=True, message_id=str(msg.message_id))
-        except Exception as e:
-            logger.warning("[%s] send_whitelist_decision failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
-
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str, confirm_id: str,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
@@ -4869,8 +4794,7 @@ class TelegramAdapter(BasePlatformAdapter):
         for prefix, handler in (
             ("gt:", self._handle_gmail_triage_callback), ("ea:", self._handle_exec_approval_callback),
             ("sc:", self._handle_slash_confirm_callback), ("cl:", self._handle_clarify_callback),
-            ("update_prompt:", self._handle_update_prompt_callback),
-            ("linewl:", self._handle_line_whitelist_callback)):
+            ("update_prompt:", self._handle_update_prompt_callback)):
             if data.startswith(prefix):
                 await handler(query, data, cb)
                 return
@@ -4927,109 +4851,6 @@ class TelegramAdapter(BasePlatformAdapter):
         # Typing was paused when the approval was sent; the text /approve and /deny paths resume it too.
         if count and cb["chat_id"] is not None:
             self.resume_typing_for_chat(str(cb["chat_id"]))
-
-    async def _handle_line_whitelist_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
-        """``linewl:action:source_type:id`` — LINE whitelist decision buttons.
-
-        Sent by ``send_whitelist_decision``. approve/ignore hit the shared
-        WhitelistStore; skip is a no-op. The LINE plugin may be absent in some
-        deployments — every store touch is guarded so a tap can never crash
-        the Telegram receive path.
-        """
-        parts = data.split(":", 3)
-        if len(parts) != 4:
-            await query.answer(text="Invalid whitelist data.")
-            return
-        _, action, source_type, source_id = parts
-
-        caller_id = str(getattr(query.from_user, "id", ""))
-        # Base gate: must pass the adapter's normal callback auth (same as
-        # every other button). Then additionally require whitelist-admin,
-        # so only LINE admins may mutate the whitelist.
-        if not await self._callback_authorized(query, cb, "⛔ You are not authorized."):
-            return
-
-        store = None
-        try:
-            from plugins.platforms.line.whitelist_store import WhitelistStore
-            store = WhitelistStore()
-        except Exception:
-            store = None
-
-        if store is not None:
-            try:
-                # Cross-platform admin: a LINE whitelist admin OR the
-                # Telegram recipient of the notify card (whose Telegram id
-                # won't match the LINE admin list). is_card_admin covers
-                # both; fall back to is_admin if an older store lacks it.
-                checker = getattr(store, "is_card_admin", None)
-                _is_admin = (
-                    checker("telegram", caller_id) if checker
-                    else store.is_admin(caller_id)
-                )
-                if not _is_admin:
-                    await query.answer(
-                        text="⛔ You are not a whitelist admin."
-                    )
-                    return
-            except Exception:
-                # Admin check unavailable — fail closed on mutations.
-                if action in ("approve", "ignore"):
-                    await query.answer(text="Whitelist unavailable.")
-                    return
-
-        user_display = getattr(query.from_user, "first_name", "User")
-        outcome = None
-        try:
-            if action == "approve":
-                if store is None:
-                    await query.answer(text="Whitelist unavailable.")
-                    return
-                res = store.approve_pending(source_id, added_by=caller_id)
-                if isinstance(res, dict) and res.get("approved"):
-                    scope = res.get("scope")
-                    outcome = (
-                        f"✅ Approved{f' ({scope})' if scope else ''} "
-                        f"by {user_display}"
-                    )
-                else:
-                    reason = ""
-                    if isinstance(res, dict):
-                        reason = res.get("reason") or ""
-                    outcome = (
-                        f"⚠️ Not approved{f': {reason}' if reason else ''}"
-                    )
-            elif action == "ignore":
-                if store is None:
-                    await query.answer(text="Whitelist unavailable.")
-                    return
-                ok = store.ignore_pending(source_id)
-                outcome = (
-                    f"⛔ Ignored by {user_display}"
-                    if ok else "⚠️ Nothing to ignore"
-                )
-            elif action == "skip":
-                outcome = f"➖ Skipped by {user_display}"
-            else:
-                await query.answer(text="Unknown action.")
-                return
-        except Exception as exc:
-            logger.error(
-                "Telegram whitelist decision failed (action=%s id=%s): %s",
-                action, source_id, exc,
-            )
-            await query.answer(text="Whitelist action failed.")
-            return
-
-        await query.answer(text=outcome or "Done")
-        try:
-            await query.edit_message_text(
-                text=self.format_message(outcome or "Done"),
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=None,
-            )
-        except Exception:
-            pass  # non-fatal if edit fails
 
     async def _handle_slash_confirm_callback(self, query, data: str, cb: Dict[str, Any]) -> None:
         """``sc:<choice>:<confirm_id>`` — resolve a slash-command confirmation."""

@@ -28,14 +28,13 @@ _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
-# Triggers the shared discord mock from tests/gateway/conftest.py before
-# importing the production module.
-from plugins.platforms.discord.adapter import (  # noqa: E402
-    AutoChoiceView,
-    DiscordAdapter,
-    _detect_inline_choices,
-    _fit_button_label,
-)
+from tests.fork_plugins._plugin_loader import load_fork_plugin  # noqa: E402
+
+_discord = load_fork_plugin("platforms/discord").adapter
+AutoChoiceView = _discord.AutoChoiceView
+DiscordAdapter = _discord.DiscordAdapter
+_detect_inline_choices = _discord._detect_inline_choices
+_fit_button_label = _discord._fit_button_label
 from gateway.config import PlatformConfig  # noqa: E402
 import discord  # noqa: E402  (mocked via conftest, imported after adapter)
 

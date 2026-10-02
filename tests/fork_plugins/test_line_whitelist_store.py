@@ -14,8 +14,11 @@ from typing import Any, Dict
 
 import pytest
 
-from plugins.platforms.line.whitelist_store import WhitelistError, WhitelistStore
-from plugins.platforms.line import whitelist_notify
+from tests.fork_plugins._plugin_loader import load_fork_plugin
+
+load_fork_plugin("platforms/line")
+from hermes_plugins.platforms__line.whitelist_store import WhitelistError, WhitelistStore  # noqa: E402
+from hermes_plugins.platforms__line import whitelist_notify  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
