@@ -1,0 +1,6 @@
+name: document-extract
+version: 1.0.0
+description: "Inlines the text of documents attached to a gateway message (PDF, Office, OpenDocument, RTF, EPUB, plain text) into the turn, so the model reads them without having to decide to call read_file. A pre_llm_call hook: it finds the gateway's '[The user sent a document ... It is saved at: ...]' notes in the user message and appends each file's extracted text as context."
+author: "Sam Liu"
+provides_hooks:
+  - pre_llm_call

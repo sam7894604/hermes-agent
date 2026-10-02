@@ -2205,7 +2205,6 @@ from gateway.run_startup import GatewayStartupMixin
 from gateway.run_watchers import GatewaySessionWatchersMixin
 from gateway.run_notifications import GatewayNotificationsMixin
 from gateway.run_inbound import GatewayInboundMixin
-from gateway.run_document_extract import GatewayDocumentExtractMixin
 from gateway.run_goals import GatewayGoalsMixin
 from gateway.run_agent_cache import GatewayAgentCacheMixin
 from gateway.run_profile_reconcile import GatewayProfileReconcileMixin
@@ -3380,8 +3379,7 @@ class GatewayRunner(
     GatewayVoiceMixin, GatewayAdapterLifecycleMixin, GatewayTopicThreadsMixin, GatewayTurnMixin,
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
     GatewaySessionWatchersMixin, GatewayNotificationsMixin, GatewayInboundMixin, GatewayGoalsMixin,
-    GatewayAgentCacheMixin, GatewayProfileReconcileMixin, GatewayPluginRewireMixin,
-    GatewayDocumentExtractMixin):
+    GatewayAgentCacheMixin, GatewayProfileReconcileMixin, GatewayPluginRewireMixin):
     """Main gateway controller: manages adapter lifecycles, routes messages to/from the agent."""
 
     # Class-level defaults so partial construction in tests doesn't blow up on attribute access.
@@ -4398,7 +4396,6 @@ class GatewayRunner(
     # (section, key) config values baked into the agent at construction: a change MUST invalidate the
     # cached agent or a mid-gateway edit is silently ignored. Add new baked-in settings here.
     # _MAX_INTERRUPT_DEPTH = 3  # Cap recursive interrupt handling (#816)
-
     _CACHE_BUSTING_CONFIG_KEYS: tuple = (
         ("model", "context_length"), ("compression", "enabled"),
         ("compression", "progress_notices"), ("compression", "threshold"),
