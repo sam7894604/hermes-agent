@@ -16,16 +16,6 @@ from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS, file_mutation_result_landed
 )
 
-# turbovault MCP tools that write to the Obsidian vault. A success from any of these
-# means the turn's content mutation actually landed -- in the vault -- even if a local
-# write_file/patch fallback in the same turn failed. The file-mutation verifier reads
-# this to avoid a false "files were NOT modified" alarm; these names are deliberately
-# NOT in FILE_MUTATING_TOOL_NAMES, which tracks local writes only.
-_VAULT_MUTATING_MCP_TOOLS = frozenset({
-    "mcp__turbovault__write_note",
-    "mcp__turbovault__edit_note",
-})
-
 # One text for "the model produced nothing after retries" on every surface (CLI explainer,
 # gateway ``(empty)`` rewrite, desktop). English source kept as a constant for importers; surfaces
 # rendering to a human use ``empty_response_explanation`` (``explainer.empty_response``).
@@ -131,21 +121,7 @@ class TurnExplainersMixin:
         spelling; ``identity`` is the resolved on-disk target and ``stat`` its signature at
         failure time. A later success on the same identity (any spelling) removes the entry.
         No-op when the per-turn state dict is not initialised (tool dispatched outside ``run_conversation``).
-
-        Also records a turn-level flag when a turbovault write lands, so the footer can
-        suppress a false alarm raised by a co-occurring local patch that failed while the
-        real write went to the vault over MCP (which local write tracking never sees).
         """
-        # Checked BEFORE the local-tool early return: these tool names are deliberately
-        # not in _FILE_MUTATING_TOOLS. is_error is False only when the result carried no
-        # {"error": ...} (see _detect_tool_failure).
-        if (
-            not is_error
-            and tool_name in _VAULT_MUTATING_MCP_TOOLS
-            and hasattr(self, "_turn_vault_mutation_succeeded")
-        ):
-            self._turn_vault_mutation_succeeded = True
-
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
         state = getattr(self, "_turn_failed_file_mutations", None)

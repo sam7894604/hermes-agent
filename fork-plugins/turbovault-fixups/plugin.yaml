@@ -1,0 +1,7 @@
+name: turbovault-fixups
+version: 1.1.0
+description: "Keeps turbovault (Obsidian vault over MCP) edits from tripping core safety nets: repairs malformed SEARCH/REPLACE payloads before edit_note sees them, and skips the doomed local patch a model sometimes issues on a vault path after a successful vault write (so the file-mutation verifier does not false-alarm). pre_tool_call / post_tool_call hooks only; unrecognized shapes pass through untouched."
+author: "Sam Liu"
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call

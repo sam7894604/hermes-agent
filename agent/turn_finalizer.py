@@ -380,13 +380,7 @@ def _append_file_mutation_footer(agent, final_response, logger):
         # applied when a real text response exists for this turn and the user didn't interrupt.
         # Empty/interrupted turns already have other surface text that shouldn't be augmented.
         _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
-        # Suppress the footer when a turbovault (vault) write succeeded this
-        # turn: the content mutation actually landed via MCP, so a failed
-        # local file-patch fallback is a false alarm, not a lost edit. The
-        # safety net stays intact when NOTHING succeeded (flag stays False),
-        # so genuine "nothing was written" turns are still surfaced.
-        _vault_ok = getattr(agent, "_turn_vault_mutation_succeeded", False)
-        if _failed and not _vault_ok and agent._file_mutation_verifier_enabled():
+        if _failed and agent._file_mutation_verifier_enabled():
             _failed = agent._file_mutations_still_failed(_failed)
             footer = agent._format_file_mutation_failure_footer(_failed)
             if footer:

@@ -1,6 +1,0 @@
-name: turbovault-fixups
-version: 1.0.0
-description: "Repairs malformed SEARCH/REPLACE payloads before turbovault's edit_note MCP tool sees them (SEARCH:/REPLACE: labels, old_string/new_string JSON) so weak models stop falling back to full-note overwrites. Runs as a pre_tool_call modify hook; unrecognized shapes pass through untouched."
-author: "Sam Liu"
-provides_hooks:
-  - pre_tool_call
