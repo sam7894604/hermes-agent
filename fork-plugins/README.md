@@ -51,9 +51,13 @@ already covers that shape.
 
 Behaviour differences versus the former core patches, all deliberate:
 
-- `line_whitelist` is a **plugin toolset** (same name). It is enabled per platform like any plugin
-  toolset — list it in `platform_toolsets.<platform>` or tick it in `hermes tools` — instead of being a
-  built-in off-by-default toolset. toothless already lists it under `platform_toolsets.line`.
+- `line_whitelist` is a **plugin toolset** (same name), and upstream turns a plugin toolset ON by default
+  on every platform that has not recorded it in `known_plugin_toolsets.<platform>`
+  (`hermes_cli/tools_config.py::_enabled_plugin_toolsets`; the static `_DEFAULT_OFF_TOOLSETS` and the
+  platform-restriction table cannot name a plugin toolset). To keep it LINE-only, add `line_whitelist`
+  to `known_plugin_toolsets.<platform>` for every other platform (or save that platform once in
+  `hermes tools`, which records all plugin toolsets); keep it listed in `platform_toolsets.line`, as
+  toothless already does. Where it does leak in, every call is still admin-gated by the handler.
 - Delegated subagents **see** `line_whitelist` in their schema when the parent has it (the static
   `DELEGATE_BLOCKED_TOOLS` list cannot name a plugin tool) but every call from a delegated child is
   refused by the handler (`agent.delegation_context.is_delegated_child_process_context`).
