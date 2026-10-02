@@ -1,0 +1,9 @@
+name: groq-cf-stt
+version: 1.0.0
+description: "Groq Whisper speech-to-text through a Cloudflare AI Gateway: the built-in groq backend plus the cf-aig-authorization header the gateway requires (BYOK, token from CF_AIG_TOKEN). Select with stt.provider: groq-cf; direct api.groq.com works unchanged."
+author: "Sam Liu"
+optional_env:
+  - name: CF_AIG_TOKEN
+    description: "Cloudflare AI Gateway token sent as cf-aig-authorization when GROQ_BASE_URL points at gateway.ai.cloudflare.com"
+    prompt: "Cloudflare AI Gateway token"
+    password: true

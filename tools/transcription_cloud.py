@@ -36,33 +36,24 @@ def _has_xai_stt_credentials() -> bool:
     return bool(resolve_xai_http_credentials().get("api_key"))
 
 
-def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body,
-                        *, extra_client_kwargs: Optional[Dict[str, Any]] = None):
+def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
     """Run ``body(client)`` on a fresh OpenAI SDK client; always closed. Transport shape comes from
     ``stt.openai.timeout`` / ``stt.openai.max_retries`` (defaults 60s, 1 retry; #112939) for every
     rider of this helper — openai, groq and deepinfra — because a self-hosted endpoint's model cold
     start exceeds the old fixed 30s and lost the voice message at the first attempt.
     Errors map to the shared envelope. APIConnectionError is checked before APITimeoutError (its
-    subclass) so timeouts report as connection errors, as they always have.
-
-    ``extra_client_kwargs`` is merged into the SDK constructor call last, so a caller can
-    add or override transport-level options (e.g. a Cloudflare AI Gateway auth header)
-    without every other provider growing the parameter. Callers that pass nothing keep
-    the exact constructor call they had before -- notably no ``default_headers`` key."""
+    subclass) so timeouts report as connection errors, as they always have."""
     try:
         from openai import OpenAI
         from tools.transcription_common import DEFAULT_STT_TIMEOUT, _config_number
         from tools.transcription_tools import _load_stt_config
         openai_config = _get_stt_section(_load_stt_config(), "openai")
-        client_kwargs: Dict[str, Any] = {
-            "api_key": api_key,
-            "base_url": base_url,
-            "timeout": _config_number(openai_config, "timeout", DEFAULT_STT_TIMEOUT),
-            "max_retries": _config_number(openai_config, "max_retries", 1, cast=int),
-        }
-        if extra_client_kwargs:
-            client_kwargs.update(extra_client_kwargs)
-        client = OpenAI(**client_kwargs)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=_config_number(openai_config, "timeout", DEFAULT_STT_TIMEOUT),
+            max_retries=_config_number(openai_config, "max_retries", 1, cast=int),
+        )
         try:
             return body(client)
         finally:
@@ -106,24 +97,9 @@ def _transcribe_groq(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe via the Groq Whisper API; language: hook > ``stt.groq.language`` > ``stt.language`` > env > auto."""
-    from tools import transcription_common as _stt_common
-    from tools.transcription_tools import (
-        _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language,
-    )
-    # Upstream dropped the tools.transcription_tools.get_env_value wrapper; read the
-    # CF token from its canonical home, as the xAI/ElevenLabs paths below already do.
-    from hermes_cli.config import get_env_value
+    from tools.transcription_tools import _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
-    # Read the module attribute at call time, from its canonical home (the
-    # tools.transcription_tools re-export is a compat shim scheduled for removal),
-    # so an override lands here instead of being frozen at import time.
-    base_url = _stt_common.GROQ_BASE_URL or ""
-    via_cf_gateway = "gateway.ai.cloudflare.com" in base_url
-    # Token read from env only, never logged.
-    aig_token = (get_env_value("CF_AIG_TOKEN") or "").strip() if via_cf_gateway else ""
-    # A direct Groq key, OR -- through the gateway -- the CF token, since in BYOK mode
-    # the gateway supplies the stored provider key.
-    if not api_key and not aig_token:
+    if not api_key:
         return _error_result("GROQ_API_KEY not set")
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
@@ -143,14 +119,7 @@ def _transcribe_groq(
         logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
                      Path(file_path).name, model_name, language or "auto", len(transcript_text))
         return _ok_result(transcript_text, "groq")
-    # Cloudflare AI Gateway BYOK: the gateway rejects the request (401 AiGatewayError,
-    # code 2009) without cf-aig-authorization. Send it and clear api_key so CF supplies
-    # the stored Groq key -- mirroring the primary-client injection in
-    # agent/agent_runtime_helpers.py. Direct api.groq.com stays untouched.
-    _extra = {"default_headers": {"cf-aig-authorization": f"Bearer {aig_token}"},
-              "api_key": ""} if aig_token else None
-    return _with_openai_client(api_key or "", base_url, file_path, "Groq", _run,
-                               extra_client_kwargs=_extra)
+    return _with_openai_client(api_key, GROQ_BASE_URL, file_path, "Groq", _run)
 
 
 def _transcribe_openai(
