@@ -51,6 +51,12 @@ cost is nil. If that CLI latency ever matters, the override `register()` can be
 rewritten to copy the scalar kwargs and proxy the callables lazily — the registration contract test
 already covers that shape.
 
+**Fallback.** Each override's `__init__.py` wraps `register()`: if `adapter.py` fails to import against
+the installed Hermes (an upstream seam moved) or its registration raises, upstream's stock adapter for
+that platform is registered instead and an ERROR is logged naming what is off. The platform stays up
+without the fork extras (LINE: the static `LINE_ALLOWED_*` env allowlists decide; empty lists deny
+everyone). `tests/fork_plugins/test_platform_overrides_registration.py::TestStockFallback` covers it.
+
 Behaviour differences versus the former core patches, all deliberate:
 
 - `line_whitelist` is a **plugin toolset** (same name), and upstream turns a plugin toolset ON by default

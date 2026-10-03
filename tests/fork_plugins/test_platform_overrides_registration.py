@@ -110,3 +110,48 @@ def test_user_dir_override_shadows_the_bundled_platform_when_enabled(tmp_path, m
     assert type(adapter) is not upstream_cls and isinstance(adapter, upstream_cls)
     if name == "line":
         assert "line_whitelist" in mgr._plugin_tool_names
+
+
+class TestStockFallback:
+    """Shadowing a bundled platform leaves no automatic fallback, so the override's entry point supplies
+    one: when the override cannot import or its registration raises, upstream's stock adapter is
+    registered and the failure is logged as an error."""
+
+    @pytest.mark.parametrize("name, cls_name, extra", CASES)
+    def test_import_failure_registers_the_stock_adapter(self, monkeypatch, caplog, name, cls_name, extra):
+        plugin = load_fork_plugin(f"platforms/{name}")
+        upstream = importlib.import_module(f"plugins.platforms.{name}.adapter")
+        monkeypatch.setattr(plugin, "adapter", None)
+        monkeypatch.setattr(plugin, "IMPORT_ERROR", ImportError("seam renamed upstream"))
+        rec = _Recorder()
+        with caplog.at_level("ERROR"):
+            plugin.register(rec)
+        built = rec.platform["adapter_factory"](PlatformConfig(enabled=True, token="t", extra=dict(extra)))
+        assert type(built) is getattr(upstream, cls_name)  # stock, not the override subclass
+        assert rec.tools == []
+        assert any("STOCK" in r.getMessage() and "seam renamed upstream" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("name, cls_name, extra", CASES)
+    def test_registration_error_falls_back_to_the_stock_adapter(self, monkeypatch, caplog, name, cls_name, extra):
+        plugin = load_fork_plugin(f"platforms/{name}")
+        upstream = importlib.import_module(f"plugins.platforms.{name}.adapter")
+
+        def _boom(ctx):
+            raise TypeError("register_platform() got an unexpected keyword")
+
+        monkeypatch.setattr(plugin.adapter, "register", _boom)
+        rec = _Recorder()
+        with caplog.at_level("ERROR"):
+            plugin.register(rec)
+        built = rec.platform["adapter_factory"](PlatformConfig(enabled=True, token="t", extra=dict(extra)))
+        assert type(built) is getattr(upstream, cls_name)
+        assert any("registration raised" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("name, cls_name, extra", CASES)
+    def test_healthy_override_is_untouched_by_the_wrapper(self, name, cls_name, extra):
+        plugin = load_fork_plugin(f"platforms/{name}")
+        assert plugin.IMPORT_ERROR is None and plugin.adapter is not None
+        rec = _Recorder()
+        plugin.register(rec)
+        built = rec.platform["adapter_factory"](PlatformConfig(enabled=True, token="t", extra=dict(extra)))
+        assert type(built) is getattr(plugin.adapter, cls_name)
